@@ -13,6 +13,12 @@ Refactored addon for Unholy DK proc highlight:
 **Optional dependency:** Blizzard_CooldownManager
 **CurseForge:** [Sudden Doom Glow (Death Coil / Epidemic)](https://www.curseforge.com/wow/addons/sudden-doom-glow-death-coil-epidemic)
 
+## Preview
+
+![Sudden Doom proc glow on an action button](https://media.forgecdn.net/attachments/1511/788/screenshot-2026-02-02-231126-png.png)
+
+Screenshot from the [CurseForge gallery](https://www.curseforge.com/wow/addons/sudden-doom-glow-death-coil-epidemic).
+
 ## Install
 
 Copy `SuddenDoomGlow` to `World of Warcraft/_retail_/Interface/AddOns/`, enable it, and reload the UI.
@@ -51,3 +57,7 @@ Compatibility notes:
 ## Current development status
 
 The listed refactor and v1.2.2 hardening work are complete in the repository snapshot. Remaining work is live in-game validation: proc timing and duration, override paths, stacks, combat Cooldown Viewer rendering, remaps/paging, and performance. See [TODO.md](TODO.md).
+
+## License
+
+Licensed under the [MIT License](LICENSE). Bundled third-party components remain under their own notices.
