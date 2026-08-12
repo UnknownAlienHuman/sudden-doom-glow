@@ -1,8 +1,12 @@
 # Code index
 
-| File | Responsibility |
+| Area | Exact anchors |
 | --- | --- |
-| `Core.lua` | persistent settings, spell/button mapping, proc signals, render state, event dispatch, `/sdglow` |
-| `Debug.lua` | debug window, log controls, aura/overlay checkboxes, rescan/test controls |
+| DB and caches | [`Core.lua`](Core.lua): `GetAddonVersion`, defaults, `BuildProcCaches`, `RebuildAuraIDSet` |
+| Button mapping | `GetButtonActionSlot`, `ScanActionSlots`, `MapButtonsFromNamedBars`, `RescanButtons`, `RequestRescan` |
+| Aura/signals | `SetAuraState`, `ScanAuraFull`, `HasOverlayProc`, `HasProcViaCost`, `UpdateFromSignals` |
+| Rendering | `EnsureSDGAlert`, `StartProc`, `StopProc`, `SafeShowGlow`, `SafeHideGlow`, `ApplyGlowState`, `SetGlow` |
+| Events/login | `SDG:OnLogin`, `SDG:RegisterRuntimeEvents`, local `OnEvent`, `EventRegistry` callback |
+| User/debug | `SlashCmdList["SUDDEN_DOOM_GLOW"]` in [`Core.lua`](Core.lua), `SDG.Debug:CreateDebugFrame` in [`Debug.lua`](Debug.lua) |
 
-Primary anchors: `OnEvent`, the event-registration block, `SlashCmdList["SUDDEN_DOOM_GLOW"]`, local button overlay creation, and debug-frame construction.
+`SuddenDoomGlowDB` is the only persistent contract; all `SDG.*` caches are runtime-only.
