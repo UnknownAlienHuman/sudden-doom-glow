@@ -1,1506 +1,1280 @@
--- Sudden Doom Glow (Retail / Midnight)
--- Reliable architecture:
---   aura state -> desired glow state -> idempotent render
--- Aura-first with conservative fallback signals.
+-- Sudden Doom Glow
+-- Retail 12.1: official Spell Activation Overlay state -> addon-owned glow surfaces.
 
 local ADDON_NAME = ... or "SuddenDoomGlow"
 
--- SavedVariables migration:
--- Wipe DB on addon version bump to prevent stale mappings/config causing wrong glows.
-if type(_G.SuddenDoomGlowDB) ~= "table" then
-    _G.SuddenDoomGlowDB = {}
-end
-SuddenDoomGlowDB = _G.SuddenDoomGlowDB
-local DB = SuddenDoomGlowDB
-
-local function GetAddonVersion()
-    local v
-
-    if _G.C_AddOns and type(_G.C_AddOns.GetAddOnMetadata) == "function" then
-        local ok, res = pcall(_G.C_AddOns.GetAddOnMetadata, ADDON_NAME, "Version")
-        if ok then v = res end
-    end
-
-    if (type(v) ~= "string" or v == "") and type(_G.GetAddOnMetadata) == "function" then
-        local ok, res = pcall(_G.GetAddOnMetadata, ADDON_NAME, "Version")
-        if ok then v = res end
-    end
-
-    if type(v) ~= "string" or v == "" then
-        v = "0"
-    end
-
-    return v
-end
-
-local CURRENT_VERSION = GetAddonVersion()
-
-local DEFAULT_AURA_IDS = { 450932, 81340 }
--- 1242174 = Necrotic Coil (Forbidden Knowledge / APEX variant).
--- Graveyard is resolved dynamically from Epidemic via GetOverrideSpell because
--- current reports conflict on hardcoding a stable spellID for it.
-local DEFAULT_PROC_SPELL_IDS = { 47541, 207317, 1242174 }
-
-local function WipeDB(t)
-    for k in pairs(t) do
-        t[k] = nil
-    end
-end
-
-local function CopyNumericList(src)
-    local out = {}
-    if type(src) ~= "table" then
-        return out
-    end
-
-    for i = 1, #src do
-        local id = tonumber(src[i])
-        if id then
-            out[#out + 1] = id
-        end
-    end
-
-    return out
-end
-
-local function MergeNumericDefaults(dst, defaults)
-    if type(dst) ~= "table" then
-        return CopyNumericList(defaults)
-    end
-
-    local seen = {}
-    for i = 1, #dst do
-        local id = tonumber(dst[i])
-        if id then
-            seen[id] = true
-            dst[i] = id
-        end
-    end
-
-    for i = 1, #defaults do
-        local id = tonumber(defaults[i])
-        if id and not seen[id] then
-            dst[#dst + 1] = id
-            seen[id] = true
-        end
-    end
-
-    return dst
-end
-
-if DB.__version ~= CURRENT_VERSION then
-    WipeDB(DB)
-    DB.__version = CURRENT_VERSION
-end
-
-if DB.debug == nil then DB.debug = false end
-if DB.enabled == nil then DB.enabled = true end
-if DB.cdm == nil then DB.cdm = true end
-if DB.auraEnabled == nil then DB.auraEnabled = true end
-if DB.overlayEnabled == nil then DB.overlayEnabled = true end
-if DB.costEnabled == nil then DB.costEnabled = true end
-DB.auraIDs = MergeNumericDefaults(DB.auraIDs, DEFAULT_AURA_IDS)
-DB.procSpellIDs = MergeNumericDefaults(DB.procSpellIDs, DEFAULT_PROC_SPELL_IDS)
-if type(DB.slots) ~= "table" then DB.slots = {} end
-
 local SDG = _G.SuddenDoomGlow
-if type(SDG) ~= "table" then SDG = {} end
-_G.SuddenDoomGlow = SDG
+if type(SDG) ~= "table" then
+    SDG = {}
+    _G.SuddenDoomGlow = SDG
+end
 
-local MAX_ACTION_SLOTS = 540
-local OVERLAY_SIGNAL_TTL = 20.0
-local RESCAN_COALESCE_DELAY = 0.08
-
-local PROC_TEMPLATES = {
-    "ActionButtonSpellAlertTemplate",
-    "ActionBarButtonSpellActivationAlert",
-    "ActionButtonSpellActivationAlert",
-    "SpellActivationAlertTemplate",
-    "SpellActivationAlert",
-}
-
+local CreateFrame = _G.CreateFrame
 local InCombatLockdown = _G.InCombatLockdown
 local UnitClass = _G.UnitClass
-local UnitGUID = _G.UnitGUID
 local GetActionInfo = _G.GetActionInfo
 local GetMacroInfo = _G.GetMacroInfo
 local GetMacroSpell = _G.GetMacroSpell
 local EnumerateFrames = _G.EnumerateFrames
-local C_Timer = _G.C_Timer
-local C_UnitAuras = _G.C_UnitAuras
-local C_ActionBar = _G.C_ActionBar
-local C_Spell = _G.C_Spell
-local GetSpellPowerCost = _G.GetSpellPowerCost
-local UnitAura = _G.UnitAura
 local GetTime = _G.GetTime
-local CombatLogGetCurrentEventInfo = _G.CombatLogGetCurrentEventInfo
+local C_Timer = _G.C_Timer
+local C_Spell = _G.C_Spell
+local C_ActionBar = _G.C_ActionBar
+local C_SpellActivationOverlay = _G.C_SpellActivationOverlay
+local C_AddOns = _G.C_AddOns
+local EventRegistry = _G.EventRegistry
+local hooksecurefunc = _G.hooksecurefunc
+local canaccessvalue = _G.canaccessvalue
+local issecretvalue = _G.issecretvalue
+
+local CURRENT_SCHEMA = 3
+local MAX_ACTION_SLOTS = 540
+local RESCAN_DELAY = 0.08
+local OVERLAY_RECONCILE_DELAY = 0.06
+local OVERLAY_SHOW_GRACE = 0.20
+local EVENT_FALLBACK_TTL = 30.0
+local CDM_ADDON = "Blizzard_CooldownViewer"
+
+local DEFAULT_TARGET_SPELL_IDS = {
+    47541,   -- Death Coil
+    207317,  -- Epidemic
+    1242174, -- Necrotic Coil
+}
+
+local DEFAULT_SIGNAL_SPELL_IDS = {
+    47541,   -- Death Coil
+    207317,  -- Epidemic
+    1242174, -- Necrotic Coil
+    450932,  -- current Sudden Doom aura / overlay family member
+    81340,   -- legacy Sudden Doom aura / overlay family member
+}
+
+local function NewWeakKeyTable()
+    return setmetatable({}, { __mode = "k" })
+end
+
+local R = {
+    class = nil,
+    didLogin = false,
+    runtimeRegistered = false,
+
+    targetRoots = {},
+    targetRootList = {},
+    targetFamily = {},
+    targetFamilyList = {},
+    signalFamily = {},
+    signalFamilyList = {},
+    procNames = {},
+    procTokens = {},
+    explicitOverrides = {},
+
+    trackedSlots = {},
+    trackedButtons = {},
+    trackedButtonSet = NewWeakKeyTable(),
+    frameState = NewWeakKeyTable(),
+
+    cdmFrames = NewWeakKeyTable(),
+    cdmViewers = NewWeakKeyTable(),
+    cdmHooksAttached = false,
+
+    eventSignals = {},
+    eventSignalTimers = {},
+    lastOverlayShowAt = 0,
+    overlayQueryReadable = 0,
+    overlayQueryCandidates = 0,
+    overlayQueryAuthoritative = false,
+
+    glowActive = false,
+    lastDetection = "none",
+    testUntil = 0,
+    testToken = 0,
+
+    needsRescan = false,
+    pendingDeep = false,
+    rescanTimer = nil,
+    rescanReason = nil,
+    queuedDeep = false,
+
+    reconcileTimer = nil,
+    actionCallbackAttached = false,
+    actionCallbackOwner = {},
+}
+SDG.runtime = R
+
+local DB
 
 local function InCombat()
     return InCombatLockdown and InCombatLockdown() or false
 end
 
-local function Print(msg)
-    if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
-        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. tostring(msg))
+local function Now()
+    return GetTime and GetTime() or 0
+end
+
+local function Print(message)
+    if _G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.AddMessage then
+        _G.DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. tostring(message))
     end
 end
 
-local function Debug(msg)
-    if not DB.debug then return end
-    local g = _G.SuddenDoomGlow
-    if g and g.Debug and g.Debug.CreateDebugFrame then
-        g:Debug(msg)
+function SDG:Print(message)
+    Print(message)
+end
+
+local function Log(message)
+    if not DB or not DB.debug then return end
+    if type(SDG.LogDebug) == "function" then
+        SDG:LogDebug(tostring(message))
     else
-        Print(msg)
+        Print(message)
     end
 end
 
-local function IsSecret(v)
-    if type(_G.issecretvalue) == "function" then
-        local ok, res = pcall(_G.issecretvalue, v)
-        if ok then
-            return res and true or false
+local function ClearArray(t)
+    for i = #t, 1, -1 do
+        t[i] = nil
+    end
+end
+
+local function ClearMap(t)
+    for key in pairs(t) do
+        t[key] = nil
+    end
+end
+
+local function IsAccessible(value)
+    if type(canaccessvalue) == "function" then
+        local ok, accessible = pcall(canaccessvalue, value)
+        if ok then return accessible and true or false end
+    end
+
+    if type(issecretvalue) == "function" then
+        local ok, secret = pcall(issecretvalue, value)
+        if ok then return not secret end
+    end
+
+    return true
+end
+
+local function SafeNumber(value)
+    if value == nil or not IsAccessible(value) then return nil end
+    if type(value) == "number" then return value end
+    if type(value) == "string" then
+        local ok, number = pcall(tonumber, value)
+        if ok then return number end
+    end
+    return nil
+end
+
+local function SafeString(value)
+    if type(value) == "string" and IsAccessible(value) then
+        return value
+    end
+    return nil
+end
+
+local function SafeMethod(object, methodName, ...)
+    if not object then return false end
+    local method = object[methodName]
+    if type(method) ~= "function" then return false end
+    return pcall(method, object, ...)
+end
+
+local function FrameCanBeUsed(frame)
+    if not frame then return false end
+
+    if type(frame.IsForbidden) == "function" then
+        local ok, forbidden = pcall(frame.IsForbidden, frame)
+        if not ok or forbidden then return false end
+    end
+
+    if type(frame.CanBeAccessedInContext) == "function" then
+        local ok, accessible = pcall(frame.CanBeAccessedInContext, frame)
+        if not ok or not accessible then return false end
+    end
+
+    return true
+end
+
+local function GetAddonVersion()
+    local version
+    if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
+        local ok, value = pcall(C_AddOns.GetAddOnMetadata, ADDON_NAME, "Version")
+        if ok then version = SafeString(value) end
+    end
+    if not version and type(_G.GetAddOnMetadata) == "function" then
+        local ok, value = pcall(_G.GetAddOnMetadata, ADDON_NAME, "Version")
+        if ok then version = SafeString(value) end
+    end
+    return version or "0"
+end
+
+local function CopyNumericList(source)
+    local result = {}
+    local seen = {}
+    if type(source) ~= "table" then return result end
+
+    for i = 1, #source do
+        local id = SafeNumber(source[i])
+        if id and id > 0 and not seen[id] then
+            seen[id] = true
+            result[#result + 1] = id
         end
     end
-
-    local tv = type(v)
-    if tv == "number" then
-        local ok = pcall(function() local _ = v + 0 end)
-        return not ok
-    elseif tv == "string" then
-        local ok = pcall(function() local _ = v .. "" end)
-        return not ok
-    end
-
-    return false
+    return result
 end
 
-local function SafeNumber(v)
-    if v == nil or IsSecret(v) then return nil end
-    if type(v) == "number" then return v end
-    if type(v) == "string" then return tonumber(v) end
-    return nil
+local function MergeNumericDefaults(destination, defaults)
+    local result = CopyNumericList(destination)
+    local seen = {}
+    for i = 1, #result do seen[result[i]] = true end
+    for i = 1, #defaults do
+        local id = defaults[i]
+        if not seen[id] then
+            seen[id] = true
+            result[#result + 1] = id
+        end
+    end
+    return result
+end
+
+local function InitializeDB()
+    if type(_G.SuddenDoomGlowDB) ~= "table" then
+        _G.SuddenDoomGlowDB = {}
+    end
+    DB = _G.SuddenDoomGlowDB
+
+    -- Preserve user settings. Older versions wiped the entire DB on every release;
+    -- migration is now field-based and schema-versioned.
+    if type(DB.targetSpellIDs) ~= "table" and type(DB.procSpellIDs) == "table" then
+        DB.targetSpellIDs = CopyNumericList(DB.procSpellIDs)
+    end
+    if type(DB.signalSpellIDs) ~= "table" and type(DB.auraIDs) == "table" then
+        DB.signalSpellIDs = CopyNumericList(DB.auraIDs)
+    end
+
+    if DB.enabled == nil then DB.enabled = true end
+    if DB.debug == nil then DB.debug = false end
+    if DB.cdm == nil then DB.cdm = true end
+
+    DB.targetSpellIDs = MergeNumericDefaults(DB.targetSpellIDs, DEFAULT_TARGET_SPELL_IDS)
+    DB.signalSpellIDs = MergeNumericDefaults(DB.signalSpellIDs, DEFAULT_SIGNAL_SPELL_IDS)
+
+    DB.schemaVersion = CURRENT_SCHEMA
+    DB.addonVersion = GetAddonVersion()
+
+    -- Retained only so downgrading does not corrupt an older client. They are not
+    -- live detection controls in the 12.1 architecture.
+    DB.procSpellIDs = nil
+    DB.auraIDs = nil
+    DB.auraEnabled = nil
+    DB.overlayEnabled = nil
+    DB.costEnabled = nil
+    DB.slots = nil
 end
 
 local function SpellName(spellID)
-    if _G.GetSpellInfo then
-        local name = _G.GetSpellInfo(spellID)
-        if type(name) == "string" then return name end
+    if C_Spell and type(C_Spell.GetSpellName) == "function" then
+        local ok, name = pcall(C_Spell.GetSpellName, spellID)
+        if ok then return SafeString(name) end
     end
-
-    if C_Spell then
-        if C_Spell.GetSpellInfo then
-            local info = C_Spell.GetSpellInfo(spellID)
-            if info and type(info.name) == "string" then
-                return info.name
-            end
-        end
-        if C_Spell.GetSpellName then
-            local name = C_Spell.GetSpellName(spellID)
-            if type(name) == "string" then return name end
+    if C_Spell and type(C_Spell.GetSpellInfo) == "function" then
+        local ok, info = pcall(C_Spell.GetSpellInfo, spellID)
+        if ok and type(info) == "table" and IsAccessible(info) then
+            return SafeString(info.name)
         end
     end
-
+    if type(_G.GetSpellInfo) == "function" then
+        local ok, name = pcall(_G.GetSpellInfo, spellID)
+        if ok then return SafeString(name) end
+    end
     return nil
 end
 
-local function WipeArray(t)
-    for i = #t, 1, -1 do t[i] = nil end
-end
-
-local function WipeMap(t)
-    for k in pairs(t) do t[k] = nil end
-end
-
-SDG.procSpellSet = SDG.procSpellSet or {}
-SDG.procNameSet = SDG.procNameSet or {}
-SDG.procTokens = SDG.procTokens or {}
-SDG.procConfiguredSpellIDs = SDG.procConfiguredSpellIDs or {}
-SDG.procSpellList = SDG.procSpellList or {}
-SDG.auraIDSet = SDG.auraIDSet or {}
-
-SDG.trackedSlots = SDG.trackedSlots or {}
-SDG.trackedButtons = SDG.trackedButtons or {}
-SDG._trackedButtonSet = SDG._trackedButtonSet or {}
-
-SDG.extraButtons = SDG.extraButtons or {}
-SDG._cdmLastSeen = SDG._cdmLastSeen or {}
-
-SDG.overlayProcSpells = SDG.overlayProcSpells or {}
-SDG.baseCost = SDG.baseCost or {}
-
-SDG.glowActive = SDG.glowActive or false
-SDG.lastDetection = SDG.lastDetection or "none"
-SDG.needsRescan = SDG.needsRescan or false
-SDG.pendingDeep = SDG.pendingDeep or false
-
-SDG.auraActive = SDG.auraActive or false
-SDG.auraStacks = SDG.auraStacks or 0
-SDG.auraSpellId = SDG.auraSpellId or nil
-SDG.auraSource = SDG.auraSource or "none"
-SDG.auraAuthoritative = SDG.auraAuthoritative or false
-SDG.auraReadFailed = SDG.auraReadFailed or false
-
-SDG.cleuAuraActive = SDG.cleuAuraActive or false
-SDG.cleuAuraStacks = SDG.cleuAuraStacks or 0
-SDG.cleuAuraSpellID = SDG.cleuAuraSpellID or nil
-SDG.cleuAuraUpdatedAt = SDG.cleuAuraUpdatedAt or 0
-
-SDG.class = SDG.class or nil
-SDG.playerGUID = SDG.playerGUID or nil
-
-SDG._updateDirty = SDG._updateDirty or false
-SDG._updateTimer = SDG._updateTimer or nil
-SDG._trackedListDirty = SDG._trackedListDirty or false
-SDG._castRefreshPending = SDG._castRefreshPending or false
-
-SDG._rescanTimer = SDG._rescanTimer or nil
-SDG._rescanReason = SDG._rescanReason or nil
-SDG._rescanDeepQueued = SDG._rescanDeepQueued or false
-
-function SDG:Print(msg)
-    Print(msg)
-end
-
-local function AddUniqueSpellID(list, seen, id)
-    id = SafeNumber(id)
-    if type(id) ~= "number" or id < 1 then
-        return false
+local function GetBaseSpellID(spellID)
+    spellID = SafeNumber(spellID)
+    if not spellID then return nil end
+    if C_Spell and type(C_Spell.GetBaseSpell) == "function" then
+        local ok, baseID = pcall(C_Spell.GetBaseSpell, spellID)
+        if ok then
+            baseID = SafeNumber(baseID)
+            if baseID and baseID > 0 then return baseID end
+        end
     end
-    if seen[id] then
-        return false
+    return spellID
+end
+
+local function GetOverrideSpellID(spellID)
+    spellID = SafeNumber(spellID)
+    if not spellID then return nil end
+    if C_Spell and type(C_Spell.GetOverrideSpell) == "function" then
+        local ok, overrideID = pcall(C_Spell.GetOverrideSpell, spellID)
+        if ok then
+            overrideID = SafeNumber(overrideID)
+            if overrideID and overrideID > 0 then return overrideID end
+        end
     end
-    seen[id] = true
+    return spellID
+end
+
+local function AddUniqueID(set, list, value)
+    local id = SafeNumber(value)
+    if not id or id < 1 or set[id] then return false end
+    set[id] = true
     list[#list + 1] = id
     return true
 end
 
-local function CollectConfiguredProcSpellIDs()
-    if type(DB.procSpellIDs) ~= "table" or #DB.procSpellIDs == 0 then
-        DB.procSpellIDs = CopyNumericList(DEFAULT_PROC_SPELL_IDS)
-    end
-
-    local ids = {}
-    local seen = {}
-    for i = 1, #DB.procSpellIDs do
-        AddUniqueSpellID(ids, seen, DB.procSpellIDs[i])
-    end
-
-    return ids
-end
-
-local function CollectOverrideSpellVariants(spellID, out, seen, depth)
+local function AddTargetFamilyChain(spellID, depth)
     depth = depth or 0
-    if depth > 6 then
-        return
+    if depth > 8 then return end
+
+    spellID = SafeNumber(spellID)
+    if not spellID or spellID < 1 then return end
+
+    local added = AddUniqueID(R.targetFamily, R.targetFamilyList, spellID)
+    local baseID = GetBaseSpellID(spellID)
+    if baseID and baseID ~= spellID then
+        AddUniqueID(R.targetFamily, R.targetFamilyList, baseID)
     end
 
-    if not AddUniqueSpellID(out, seen, spellID) then
-        return
-    end
-
-    if C_Spell and C_Spell.GetOverrideSpell then
-        local ok, overrideID = pcall(C_Spell.GetOverrideSpell, spellID)
-        if ok and type(overrideID) == "number" and overrideID > 0 and overrideID ~= spellID then
-            CollectOverrideSpellVariants(overrideID, out, seen, depth + 1)
+    local overrideID = GetOverrideSpellID(spellID)
+    if overrideID and overrideID ~= spellID then
+        if AddUniqueID(R.targetFamily, R.targetFamilyList, overrideID) then
+            AddTargetFamilyChain(overrideID, depth + 1)
+        end
+    elseif added and baseID and baseID ~= spellID then
+        local baseOverrideID = GetOverrideSpellID(baseID)
+        if baseOverrideID and baseOverrideID ~= baseID then
+            AddTargetFamilyChain(baseOverrideID, depth + 1)
         end
     end
 end
 
-local function BuildProcCaches()
-    WipeMap(SDG.procSpellSet)
-    WipeMap(SDG.procNameSet)
-    WipeArray(SDG.procTokens)
-    WipeArray(SDG.procConfiguredSpellIDs)
-    WipeArray(SDG.procSpellList)
+local function RebuildSpellFamilies()
+    ClearMap(R.targetRoots)
+    ClearArray(R.targetRootList)
+    ClearMap(R.targetFamily)
+    ClearArray(R.targetFamilyList)
+    ClearMap(R.signalFamily)
+    ClearArray(R.signalFamilyList)
+    ClearMap(R.procNames)
+    ClearArray(R.procTokens)
 
-    local configured = CollectConfiguredProcSpellIDs()
-    for i = 1, #configured do
-        SDG.procConfiguredSpellIDs[i] = configured[i]
+    DB.targetSpellIDs = MergeNumericDefaults(DB.targetSpellIDs, DEFAULT_TARGET_SPELL_IDS)
+    DB.signalSpellIDs = MergeNumericDefaults(DB.signalSpellIDs, DEFAULT_SIGNAL_SPELL_IDS)
+
+    for i = 1, #DB.targetSpellIDs do
+        local configuredID = SafeNumber(DB.targetSpellIDs[i])
+        if configuredID then
+            local baseID = GetBaseSpellID(configuredID) or configuredID
+            AddUniqueID(R.targetRoots, R.targetRootList, baseID)
+            AddTargetFamilyChain(configuredID, 0)
+            AddTargetFamilyChain(baseID, 0)
+        end
     end
 
-    local seen = {}
-    for i = 1, #configured do
-        CollectOverrideSpellVariants(configured[i], SDG.procSpellList, seen, 0)
+    for baseID, overrideID in pairs(R.explicitOverrides) do
+        if R.targetRoots[baseID] or R.targetFamily[baseID] then
+            AddTargetFamilyChain(overrideID, 0)
+        end
     end
 
-    for i = 1, #SDG.procSpellList do
-        local sid = SDG.procSpellList[i]
-        SDG.procSpellSet[sid] = true
-        SDG.procTokens[#SDG.procTokens + 1] = tostring(sid)
+    for i = 1, #R.targetFamilyList do
+        AddUniqueID(R.signalFamily, R.signalFamilyList, R.targetFamilyList[i])
+    end
+    for i = 1, #DB.signalSpellIDs do
+        AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i])
+    end
 
-        local n = SpellName(sid)
-        if n then
-            local ln = n:lower()
-            SDG.procNameSet[ln] = true
-            SDG.procTokens[#SDG.procTokens + 1] = ln
+    for i = 1, #R.targetFamilyList do
+        local spellID = R.targetFamilyList[i]
+        R.procTokens[#R.procTokens + 1] = tostring(spellID)
+        local name = SpellName(spellID)
+        if name then
+            local lower = name:lower()
+            R.procNames[lower] = true
+            R.procTokens[#R.procTokens + 1] = lower
         end
     end
 end
 
-function SDG:RebuildAuraIDSet()
-    WipeMap(self.auraIDSet)
+local function IsTargetFamilySpell(spellID, learn)
+    spellID = SafeNumber(spellID)
+    if not spellID then return false end
+    if R.targetFamily[spellID] then return true end
 
-    if type(DB.auraIDs) ~= "table" then DB.auraIDs = {} end
-    for i = 1, #DB.auraIDs do
-        local id = tonumber(DB.auraIDs[i])
-        if id then
-            self.auraIDSet[id] = true
+    local baseID = GetBaseSpellID(spellID)
+    if baseID and (R.targetRoots[baseID] or R.targetFamily[baseID]) then
+        if learn then
+            AddTargetFamilyChain(spellID, 0)
+            AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
         end
-    end
-end
-
-local function SafePlay(anim)
-    if anim and anim.Play then
-        pcall(anim.Play, anim)
         return true
     end
-    return false
-end
 
-local function SafeStop(anim)
-    if anim and anim.Stop then
-        pcall(anim.Stop, anim)
-        return true
-    end
-    return false
-end
-
-local function StartProc(alert)
-    if not alert then return end
-
-    local start = alert.ProcStartAnim or alert.procStartAnim or alert.AnimIn or alert.animIn
-    local loop = alert.ProcLoopAnim or alert.procLoopAnim or alert.AnimLoop or alert.animLoop
-    local startFB = alert.ProcStartFlipbook or alert.procStartFlipbook
-    local loopFB = alert.ProcLoopFlipbook or alert.procLoopFlipbook
-
-    local outro = alert.ProcEndAnim or alert.procEndAnim or alert.AnimOut or alert.animOut
-    SafeStop(outro)
-
-    local startAnim = start or startFB
-    local loopAnim = loop or loopFB
-
-    local started = SafePlay(startAnim)
-    if not started then
-        SafePlay(loopAnim)
-        return
-    end
-
-    if loopAnim and loopAnim.Play then
-        if startAnim and startAnim.SetScript and not startAnim.__SDG_ChainLoop then
-            startAnim.__SDG_ChainLoop = true
-            startAnim:SetScript("OnFinished", function()
-                if alert and alert.IsShown and alert:IsShown() then
-                    pcall(loopAnim.Play, loopAnim)
-                end
-            end)
-        elseif C_Timer and C_Timer.After then
-            C_Timer.After(0.12, function()
-                if alert and alert.IsShown and alert:IsShown() then
-                    pcall(loopAnim.Play, loopAnim)
-                end
-            end)
-        end
-    end
-end
-
-local function StopProc(alert)
-    if not alert then return end
-
-    local outro = alert.ProcEndAnim or alert.procEndAnim or alert.AnimOut or alert.animOut
-    if outro and outro.Play then
-        pcall(outro.Play, outro)
-        return
-    end
-
-    SafeStop(alert.ProcStartAnim or alert.procStartAnim or alert.AnimIn or alert.animIn)
-    SafeStop(alert.ProcLoopAnim or alert.procLoopAnim or alert.AnimLoop or alert.animLoop)
-    SafeStop(alert.ProcStartFlipbook or alert.procStartFlipbook)
-    SafeStop(alert.ProcLoopFlipbook or alert.procLoopFlipbook)
-end
-
-local function EnsureSDGAlert(btn)
-    if not btn or not _G.CreateFrame then return nil end
-    if btn.IsForbidden and btn:IsForbidden() then return nil end
-
-    if btn.__SDG_Alert then return btn.__SDG_Alert end
-
-    local w, h = 0, 0
-    if btn.GetSize then w, h = btn:GetSize() end
-
-    for i = 1, #PROC_TEMPLATES do
-        local template = PROC_TEMPLATES[i]
-        local ok, alert = pcall(_G.CreateFrame, "Frame", nil, btn, template)
-        if ok and alert then
-            if w and h and w > 0 and h > 0 then
-                alert:SetSize(w * 1.4, h * 1.4)
-            else
-                alert:SetAllPoints(btn)
+    for i = 1, #R.targetRootList do
+        local rootID = R.targetRootList[i]
+        local overrideID = GetOverrideSpellID(rootID)
+        if overrideID == spellID then
+            if learn then
+                R.explicitOverrides[rootID] = spellID
+                AddTargetFamilyChain(spellID, 0)
+                AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
             end
-            alert:SetPoint("CENTER", btn, "CENTER", 0, 0)
-            alert:SetFrameStrata("HIGH")
-            alert:SetFrameLevel((btn.GetFrameLevel and btn:GetFrameLevel() or 0) + 50)
-            alert:Hide()
-            btn.__SDG_Alert = alert
-            btn.__SDG_AlertShown = false
-            return alert
+            return true
         end
     end
 
-    return nil
+    return false
 end
 
-local GetButtonActionSlot
-local SafeHideGlow
-local MacroMatchesProc
+local function LearnExplicitOverride(baseSpellID, overrideSpellID, source)
+    baseSpellID = SafeNumber(baseSpellID)
+    overrideSpellID = SafeNumber(overrideSpellID)
+    if not baseSpellID then return false end
 
-local function AddTrackedButton(btn)
-    if not btn then return end
-    if btn.IsForbidden and btn:IsForbidden() then return end
-    if SDG._trackedButtonSet[btn] then return end
-
-    SDG._trackedButtonSet[btn] = true
-    SDG.trackedButtons[#SDG.trackedButtons + 1] = btn
-end
-
-local function RemoveTrackedButton(btn)
-    if not btn then return end
-    if not SDG._trackedButtonSet[btn] then return end
-
-    SDG._trackedButtonSet[btn] = nil
-    SDG._trackedListDirty = true
-    SafeHideGlow(btn)
-end
-
-function SDG:CompactTrackedButtons()
-    if not self._trackedListDirty then return end
-
-    local keep = {}
-    for i = 1, #self.trackedButtons do
-        local btn = self.trackedButtons[i]
-        if btn and self._trackedButtonSet[btn] then
-            keep[#keep + 1] = btn
-        end
-    end
-
-    WipeArray(self.trackedButtons)
-    WipeMap(self._trackedButtonSet)
-
-    for i = 1, #keep do
-        local btn = keep[i]
-        self.trackedButtons[i] = btn
-        self._trackedButtonSet[btn] = true
-    end
-
-    self._trackedListDirty = false
-end
-
-GetButtonActionSlot = function(btn)
-    local t = type(btn)
-    if t ~= "table" and t ~= "userdata" then return nil end
-
-    local name
-    if btn.GetName then
-        local ok, n = pcall(btn.GetName, btn)
-        if ok and type(n) == "string" then name = n end
-    end
-
-    local function IsKnownActionButtonName(n)
-        if type(n) ~= "string" then return false end
-        if n:match("^ActionButton%d+$") then return true end
-        if n:match("^MultiBar") then return true end
-        if n:match("^ExtraActionButton") then return true end
-        if n:match("^ElvUI_Bar%d+Button%d+$") then return true end
-        if n:match("^BT4Button%d+$") then return true end
-        if n:match("^DominosActionButton%d+$") then return true end
+    local normalizedBase = GetBaseSpellID(baseSpellID) or baseSpellID
+    if not (R.targetRoots[normalizedBase] or R.targetFamily[normalizedBase] or R.targetFamily[baseSpellID]) then
         return false
     end
 
+    if not overrideSpellID then
+        if R.explicitOverrides[normalizedBase] then
+            R.explicitOverrides[normalizedBase] = nil
+            RebuildSpellFamilies()
+            Log("Override removed for " .. tostring(normalizedBase) .. " (" .. tostring(source) .. ")")
+            return true
+        end
+        return false
+    end
+
+    if R.explicitOverrides[normalizedBase] == overrideSpellID and R.targetFamily[overrideSpellID] then
+        return false
+    end
+
+    R.explicitOverrides[normalizedBase] = overrideSpellID
+    RebuildSpellFamilies()
+    Log(("Override %d -> %d (%s)"):format(normalizedBase, overrideSpellID, tostring(source)))
+    return true
+end
+
+local function IsRelevantSignal(spellID)
+    spellID = SafeNumber(spellID)
+    if not spellID then return false end
+    if R.signalFamily[spellID] then return true end
+    if IsTargetFamilySpell(spellID, true) then
+        AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
+        return true
+    end
+    return false
+end
+
+local function MacroMatchesTarget(macroID)
+    macroID = SafeNumber(macroID)
+    if not macroID then return false end
+
+    if type(GetMacroSpell) == "function" then
+        local ok, spell = pcall(GetMacroSpell, macroID)
+        if ok then
+            local spellID = SafeNumber(spell)
+            if spellID and IsTargetFamilySpell(spellID, true) then return true end
+            local spellName = SafeString(spell)
+            if spellName and R.procNames[spellName:lower()] then return true end
+        end
+    end
+
+    if type(GetMacroInfo) ~= "function" then return false end
+    local ok, _, _, body = pcall(GetMacroInfo, macroID)
+    if not ok or type(body) ~= "string" or not IsAccessible(body) then return false end
+
+    local lower = body:lower()
+    for i = 1, #R.procTokens do
+        if lower:find(R.procTokens[i], 1, true) then return true end
+    end
+    return false
+end
+
+local function GetActionSpellID(slot)
+    slot = SafeNumber(slot)
+    if not slot or type(GetActionInfo) ~= "function" then return nil, nil end
+
+    local ok, actionType, id, subType = pcall(GetActionInfo, slot)
+    if not ok then return nil, nil end
+    actionType = SafeString(actionType)
+    subType = SafeString(subType)
+
+    if actionType == "spell" then
+        return SafeNumber(id), actionType
+    end
+
+    if actionType == "macro" then
+        local macroID = SafeNumber(id)
+        if macroID and type(GetMacroSpell) == "function" then
+            local spellOK, macroSpell = pcall(GetMacroSpell, macroID)
+            if spellOK then
+                local macroSpellID = SafeNumber(macroSpell)
+                if macroSpellID then return macroSpellID, actionType end
+            end
+        end
+        return nil, actionType, macroID, subType
+    end
+
+    if C_ActionBar and type(C_ActionBar.GetSpell) == "function" then
+        local spellOK, spellID = pcall(C_ActionBar.GetSpell, slot)
+        if spellOK then
+            spellID = SafeNumber(spellID)
+            if spellID then return spellID, actionType end
+        end
+    end
+
+    return nil, actionType
+end
+
+local function SlotMatchesTarget(slot)
+    local spellID, actionType, macroID = GetActionSpellID(slot)
+    if spellID and IsTargetFamilySpell(spellID, true) then return true end
+    if actionType == "macro" and macroID and MacroMatchesTarget(macroID) then return true end
+    return false
+end
+
+local function TrackSlot(slot)
+    slot = SafeNumber(slot)
+    if not slot or slot < 1 or slot > MAX_ACTION_SLOTS then return false end
+    if R.trackedSlots[slot] then return false end
+    R.trackedSlots[slot] = true
+    return true
+end
+
+local function AddSlotsFromFindSpell(spellID)
+    if not (C_ActionBar and type(C_ActionBar.FindSpellActionButtons) == "function") then return end
+    local baseID = GetBaseSpellID(spellID) or spellID
+    local ok, slots = pcall(C_ActionBar.FindSpellActionButtons, baseID)
+    if not ok or type(slots) ~= "table" or not IsAccessible(slots) then return end
+
+    pcall(function()
+        for i = 1, #slots do TrackSlot(slots[i]) end
+    end)
+end
+
+local function ScanActionSlots()
+    ClearMap(R.trackedSlots)
+    RebuildSpellFamilies()
+
+    for i = 1, #R.targetRootList do AddSlotsFromFindSpell(R.targetRootList[i]) end
+    for i = 1, #R.targetFamilyList do AddSlotsFromFindSpell(R.targetFamilyList[i]) end
+
+    for slot = 1, MAX_ACTION_SLOTS do
+        if SlotMatchesTarget(slot) then TrackSlot(slot) end
+    end
+end
+
+local function GetButtonSlot(button)
+    if not button or not FrameCanBeUsed(button) then return nil end
     local candidates = {}
     local seen = {}
-    local function Push(slot)
-        if type(slot) ~= "number" then return end
-        if slot < 1 or slot > MAX_ACTION_SLOTS then return end
-        if not seen[slot] then
+
+    local function Add(value)
+        local slot = SafeNumber(value)
+        if slot and slot >= 1 and slot <= MAX_ACTION_SLOTS and not seen[slot] then
             seen[slot] = true
             candidates[#candidates + 1] = slot
         end
     end
 
-    -- Blizzard helper: resolves current paged ID for action buttons.
-    -- Prefer it for known action button names (Blizzard / major bar mods).
-    local getPaged = _G.ActionButton_GetPagedID
-    if type(getPaged) == "function" and IsKnownActionButtonName(name) then
-        local ok, slot = pcall(getPaged, btn)
-        if ok then Push(slot) end
+    if type(button.GetPagedID) == "function" then
+        local ok, value = pcall(button.GetPagedID, button)
+        if ok then Add(value) end
+    end
+    if type(button.GetAction) == "function" then
+        local ok, value = pcall(button.GetAction, button)
+        if ok then Add(value) end
     end
 
-    -- Button mixin helpers (some action bar mods keep these updated).
-    if type(btn.GetPagedID) == "function" then
-        local ok, slot = pcall(btn.GetPagedID, btn)
-        if ok then Push(slot) end
+    Add(button.action)
+    Add(button._state_action)
+
+    if type(button.GetAttribute) == "function" then
+        local ok, value = pcall(button.GetAttribute, button, "action")
+        if ok then Add(value) end
     end
 
-    if type(btn.GetAction) == "function" then
-        local ok, slot = pcall(btn.GetAction, btn)
-        if ok then Push(slot) end
+    if type(_G.ActionButton_GetPagedID) == "function" then
+        local ok, value = pcall(_G.ActionButton_GetPagedID, button)
+        if ok then Add(value) end
     end
 
-    -- Secure attribute (some implementations keep it updated).
-    if btn.GetAttribute then
-        local a = btn:GetAttribute("action")
-        Push(a)
+    for i = 1, #candidates do
+        local slot = candidates[i]
+        if R.trackedSlots[slot] and SlotMatchesTarget(slot) then return slot end
     end
 
-    Push(btn._state_action)
-    Push(btn.action)
-
-    -- If multiple candidates exist (common with paging/state drivers), try to pick the one
-    -- that actually contains our proc action. This prevents wrong glows on bars that report
-    -- button indices (1-12) instead of real action slots.
-    if #candidates > 1 then
-        for i = 1, #candidates do
-            local s = candidates[i]
-            if SDG.trackedSlots and SDG.trackedSlots[s] then
-                return s
-            end
-        end
-        if GetActionInfo then
-            for i = 1, #candidates do
-                local s = candidates[i]
-                local ok, actionType, id = pcall(GetActionInfo, s)
-                if ok and actionType == "spell" and type(id) == "number" and SDG.procSpellSet[id] then
-                    return s
-                end
-                if ok and actionType == "macro" and id and MacroMatchesProc(id) then
-                    return s
-                end
-            end
-        end
+    for i = 1, #candidates do
+        if SlotMatchesTarget(candidates[i]) then return candidates[i] end
     end
 
     return candidates[1]
 end
 
-
-local function SafeShowGlow(btn)
-    if not btn then return end
-
-    -- Always validate current action-slot, even in combat.
-    -- Paging/stance/vehicle swaps can occur during combat; we must not glow the wrong physical button.
-    if not btn.__SDG_CDMTracked then
-        local slot = GetButtonActionSlot(btn)
-        if not slot then
-            -- If we cannot resolve safely, do not show.
-            SafeHideGlow(btn)
-            return
-        end
-        if not SDG.trackedSlots[slot] then
-            SafeHideGlow(btn)
-            return
-        end
-    end
-
-    local inCombat = InCombat()
-    if not btn.__SDG_CDMTracked then
-        if inCombat then
-            -- In combat we never mutate the tracked list; just ensure we only glow tracked buttons.
-            if not SDG._trackedButtonSet[btn] then
-                return
-            end
-        else
-            local slot = GetButtonActionSlot(btn)
-            if not slot or not SDG.trackedSlots[slot] then
-                RemoveTrackedButton(btn)
-                return
-            end
-        end
-    end
-
-    local alert = EnsureSDGAlert(btn)
-    if not alert then return end
-
-    if btn.__SDG_AlertShown and alert.IsShown and alert:IsShown() then return end
-
-    alert:Show()
-    StartProc(alert)
-    btn.__SDG_AlertShown = true
+local function IsCurrentTargetButton(button)
+    local slot = GetButtonSlot(button)
+    return slot and R.trackedSlots[slot] and SlotMatchesTarget(slot), slot
 end
 
-SafeHideGlow = function(btn)
-    if not btn then return end
-
-    local alert = btn.__SDG_Alert
-    if not alert then
-        btn.__SDG_AlertShown = false
-        return
+local function GetRenderTarget(frame)
+    if not frame then return nil end
+    local iconFrame = frame.Icon
+    if iconFrame and type(iconFrame.GetObjectType) == "function" then
+        local ok, objectType = pcall(iconFrame.GetObjectType, iconFrame)
+        if ok and objectType == "Frame" and FrameCanBeUsed(iconFrame) then
+            return iconFrame
+        end
     end
-
-    if not btn.__SDG_AlertShown and not (alert.IsShown and alert:IsShown()) then
-        return
-    end
-
-    StopProc(alert)
-    alert:Hide()
-    btn.__SDG_AlertShown = false
+    return frame
 end
 
-function SDG:PrimeAlerts()
+local function GetFrameState(frame)
+    local state = R.frameState[frame]
+    if not state then
+        state = { alert = nil, shown = false, renderTarget = nil, isCDM = false }
+        R.frameState[frame] = state
+    end
+    return state
+end
+
+local function RefreshAlertGeometry(frame, state)
     if InCombat() then return end
+    local target = GetRenderTarget(frame)
+    if not target or not FrameCanBeUsed(target) or not state.alert then return end
 
-    self:CompactTrackedButtons()
-    for i = 1, #self.trackedButtons do
-        EnsureSDGAlert(self.trackedButtons[i])
+    local width, height = 0, 0
+    if type(target.GetSize) == "function" then
+        local ok, w, h = pcall(target.GetSize, target)
+        if ok then
+            width = SafeNumber(w) or 0
+            height = SafeNumber(h) or 0
+        end
     end
-    for i = 1, #self.extraButtons do
-        EnsureSDGAlert(self.extraButtons[i])
+
+    pcall(state.alert.ClearAllPoints, state.alert)
+    if width > 0 and height > 0 then
+        pcall(state.alert.SetSize, state.alert, width * 1.4, height * 1.4)
+        pcall(state.alert.SetPoint, state.alert, "CENTER", target, "CENTER", 0, 0)
+    else
+        pcall(state.alert.SetAllPoints, state.alert, target)
     end
+
+    if type(target.GetFrameLevel) == "function" and type(state.alert.SetFrameLevel) == "function" then
+        local ok, level = pcall(target.GetFrameLevel, target)
+        level = ok and SafeNumber(level) or nil
+        if level then pcall(state.alert.SetFrameLevel, state.alert, level + 20) end
+    end
+
+    state.renderTarget = target
 end
 
-MacroMatchesProc = function(macroID)
-    if not macroID then return false end
+local function EnsureAlert(frame)
+    if not frame or not FrameCanBeUsed(frame) then return nil end
+    local state = GetFrameState(frame)
+    if state.alert then
+        RefreshAlertGeometry(frame, state)
+        return state.alert
+    end
+    if InCombat() or type(CreateFrame) ~= "function" then return nil end
 
-    if GetMacroSpell then
-        local ms = GetMacroSpell(macroID)
-        if type(ms) == "number" and SDG.procSpellSet[ms] then
-            return true
-        end
-        if type(ms) == "string" and SDG.procNameSet[ms:lower()] then
-            return true
-        end
+    local target = GetRenderTarget(frame)
+    if not target or not FrameCanBeUsed(target) then return nil end
+    local ok, alert = pcall(CreateFrame, "Frame", nil, target, "ActionButtonSpellAlertTemplate")
+    if not ok or not alert then
+        Log("ActionButtonSpellAlertTemplate unavailable for a render target")
+        return nil
     end
 
-    if not GetMacroInfo then return false end
+    state.alert = alert
+    state.renderTarget = target
+    state.shown = false
+    pcall(alert.Hide, alert)
+    RefreshAlertGeometry(frame, state)
+    return alert
+end
 
-    local _, _, body = GetMacroInfo(macroID)
-    if type(body) ~= "string" or body == "" then
-        return false
+local function StopAnimation(animation)
+    if animation and type(animation.Stop) == "function" then pcall(animation.Stop, animation) end
+end
+
+local function PlayAnimation(animation)
+    if animation and type(animation.Play) == "function" then
+        local ok = pcall(animation.Play, animation)
+        return ok
     end
-
-    local b = body:lower()
-    for i = 1, #SDG.procTokens do
-        local tok = SDG.procTokens[i]
-        if tok and b:find(tok, 1, true) then
-            return true
-        end
-    end
-
     return false
 end
 
-local function SlotLooksLikeProc(slot)
-    local actionType, id = GetActionInfo(slot)
-
-    if actionType == "spell" and type(id) == "number" and SDG.procSpellSet[id] then
-        return true
-    end
-
-    if actionType == "macro" and id then
-        if MacroMatchesProc(id) then return true end
-        if type(id) == "number" and SDG.procSpellSet[id] then return true end
-    end
-
-    return false
-end
-
-local function ScanActionSlots()
-    WipeMap(SDG.trackedSlots)
-    BuildProcCaches()
-
-    local found = {}
-    local seen = {}
-
-    local function TrackSlot(slot)
-        slot = SafeNumber(slot)
-        if type(slot) ~= "number" then return end
-        if slot < 1 or slot > MAX_ACTION_SLOTS then return end
-        if seen[slot] then return end
-        seen[slot] = true
-        SDG.trackedSlots[slot] = true
-        found[#found + 1] = slot
-    end
-
-    if C_ActionBar and C_ActionBar.FindSpellActionButtons then
-        for i = 1, #SDG.procSpellList do
-            local sid = SDG.procSpellList[i]
-            local ok, slots = pcall(C_ActionBar.FindSpellActionButtons, sid)
-            if ok and type(slots) == "table" then
-                for j = 1, #slots do
-                    TrackSlot(slots[j])
-                end
+local function ShowFrameGlow(frame)
+    if not frame or not FrameCanBeUsed(frame) then return end
+    local state = GetFrameState(frame)
+    if not state.isCDM then
+        local current = IsCurrentTargetButton(frame)
+        if not current then
+            if state.shown and state.alert then
+                StopAnimation(state.alert.ProcStartAnim)
+                StopAnimation(state.alert.ProcLoop)
+                pcall(state.alert.Hide, state.alert)
+                state.shown = false
             end
+            return
         end
     end
 
-    for slot = 1, MAX_ACTION_SLOTS do
-        if SlotLooksLikeProc(slot) then
-            TrackSlot(slot)
-        end
+    local alert = EnsureAlert(frame)
+    if not alert or state.shown then return end
+
+    StopAnimation(alert.ProcLoop)
+    pcall(alert.Show, alert)
+    alert.animationPlaying = true
+    if not PlayAnimation(alert.ProcStartAnim) then
+        PlayAnimation(alert.ProcLoop)
+    end
+    state.shown = true
+end
+
+local function HideFrameGlow(frame)
+    if not frame then return end
+    local state = R.frameState[frame]
+    if not state or not state.alert then return end
+    if not state.shown then
+        pcall(state.alert.Hide, state.alert)
+        return
     end
 
-    DB.slots = found
-    Debug(("Slots mapped: %d"):format(#found))
+    state.alert.animationPlaying = false
+    StopAnimation(state.alert.ProcStartAnim)
+    StopAnimation(state.alert.ProcLoop)
+    pcall(state.alert.Hide, state.alert)
+    state.shown = false
+end
+
+local function CompactTrackedButtons()
+    local compact = {}
+    local set = NewWeakKeyTable()
+    for i = 1, #R.trackedButtons do
+        local button = R.trackedButtons[i]
+        if button and R.trackedButtonSet[button] and FrameCanBeUsed(button) then
+            compact[#compact + 1] = button
+            set[button] = true
+        end
+    end
+    R.trackedButtons = compact
+    R.trackedButtonSet = set
+end
+
+local function AddTrackedButton(button)
+    if not button or R.trackedButtonSet[button] or not FrameCanBeUsed(button) then return end
+    R.trackedButtonSet[button] = true
+    R.trackedButtons[#R.trackedButtons + 1] = button
+end
+
+local function RemoveTrackedButton(button)
+    if not button or not R.trackedButtonSet[button] then return end
+    HideFrameGlow(button)
+    R.trackedButtonSet[button] = nil
 end
 
 local NAMED_BUTTON_SETS = {
-    { prefix = "ActionButton", count = 12 },
-    { prefix = "MultiBarBottomLeftButton", count = 12 },
-    { prefix = "MultiBarBottomRightButton", count = 12 },
-    { prefix = "MultiBarRightButton", count = 12 },
-    { prefix = "MultiBarLeftButton", count = 12 },
-    { prefix = "MultiBar5Button", count = 12 },
-    { prefix = "MultiBar6Button", count = 12 },
-    { prefix = "MultiBar7Button", count = 12 },
-    { prefix = "MultiBar8Button", count = 12 },
-    { prefix = "MultiBar9Button", count = 12 },
-    { prefix = "MultiBar10Button", count = 12 },
-    { prefix = "BT4Button", count = 180 },
-    { prefix = "DominosActionButton", count = 180 },
+    { "ActionButton", 12 },
+    { "MultiBarBottomLeftButton", 12 },
+    { "MultiBarBottomRightButton", 12 },
+    { "MultiBarRightButton", 12 },
+    { "MultiBarLeftButton", 12 },
+    { "MultiBar5Button", 12 },
+    { "MultiBar6Button", 12 },
+    { "MultiBar7Button", 12 },
+    { "MultiBar8Button", 12 },
+    { "MultiBar9Button", 12 },
+    { "MultiBar10Button", 12 },
+    { "BT4Button", 180 },
+    { "DominosActionButton", 180 },
 }
 
-local function MapButtonsFromNamedBars()
-    for s = 1, #NAMED_BUTTON_SETS do
-        local set = NAMED_BUTTON_SETS[s]
-        for i = 1, set.count do
-            local btn = _G[set.prefix .. i]
-            if btn then
-                local slot = GetButtonActionSlot(btn)
-                if slot and SDG.trackedSlots[slot] then
-                    AddTrackedButton(btn)
-                end
+local function MapNamedButtons()
+    for setIndex = 1, #NAMED_BUTTON_SETS do
+        local prefix = NAMED_BUTTON_SETS[setIndex][1]
+        local count = NAMED_BUTTON_SETS[setIndex][2]
+        for index = 1, count do
+            local button = _G[prefix .. index]
+            if button then
+                local matches = IsCurrentTargetButton(button)
+                if matches then AddTrackedButton(button) end
             end
         end
     end
 
-    for bar = 1, 10 do
-        for i = 1, 12 do
-            local btn = _G["ElvUI_Bar" .. bar .. "Button" .. i]
-            if btn then
-                local slot = GetButtonActionSlot(btn)
-                if slot and SDG.trackedSlots[slot] then
-                    AddTrackedButton(btn)
-                end
+    for bar = 1, 15 do
+        for index = 1, 12 do
+            local button = _G["ElvUI_Bar" .. bar .. "Button" .. index]
+            if button then
+                local matches = IsCurrentTargetButton(button)
+                if matches then AddTrackedButton(button) end
             end
-        end
-    end
-
-    local extra = _G.ExtraActionButton1
-    if extra then
-        local slot = GetButtonActionSlot(extra)
-        if slot and SDG.trackedSlots[slot] then
-            AddTrackedButton(extra)
         end
     end
 end
 
-local function EnumerateAndMapButtons(maxFrames)
-    if not EnumerateFrames then return end
-
+local function DeepMapButtons(maxFrames)
+    if type(EnumerateFrames) ~= "function" then return end
     local count = 0
-    local f = EnumerateFrames()
-    while f do
+    local frame = EnumerateFrames()
+    while frame do
         count = count + 1
-        if maxFrames and count > maxFrames then break end
-
-        if f.GetObjectType then
-            local ot = f:GetObjectType()
-            if (ot == "Button" or ot == "CheckButton") and not (f.IsForbidden and f:IsForbidden()) then
-                local slot = GetButtonActionSlot(f)
-                if slot and SDG.trackedSlots[slot] then
-                    AddTrackedButton(f)
-                end
+        if count > maxFrames then break end
+        if FrameCanBeUsed(frame) and type(frame.GetObjectType) == "function" then
+            local ok, objectType = pcall(frame.GetObjectType, frame)
+            if ok and (objectType == "Button" or objectType == "CheckButton") then
+                local matches = IsCurrentTargetButton(frame)
+                if matches then AddTrackedButton(frame) end
             end
         end
-
-        f = EnumerateFrames(f)
+        frame = EnumerateFrames(frame)
     end
 end
-function SDG:RescanButtons(deep)
-    if InCombat() then
-        self.needsRescan = true
-        if deep then self.pendingDeep = true end
-        Debug("Rescan deferred (combat)")
-        return
-    end
 
-    self.needsRescan = false
-
-    local wasActive = self.glowActive
-    if wasActive then
-        for i = 1, #self.trackedButtons do
-            SafeHideGlow(self.trackedButtons[i])
-        end
-        for i = 1, #self.extraButtons do
-            SafeHideGlow(self.extraButtons[i])
+local function GetCDMFrameSpellIDs(frame)
+    local ids = {}
+    local seen = {}
+    local function Add(value)
+        local id = SafeNumber(value)
+        if id and id > 0 and not seen[id] then
+            seen[id] = true
+            ids[#ids + 1] = id
         end
     end
 
-    WipeArray(self.trackedButtons)
-    WipeMap(self._trackedButtonSet)
-    self._trackedListDirty = false
-
-    ScanActionSlots()
-    MapButtonsFromNamedBars()
-
-    if deep then
-        EnumerateAndMapButtons(25000)
+    if type(frame.GetBaseSpellID) == "function" then
+        local ok, value = pcall(frame.GetBaseSpellID, frame)
+        if ok then Add(value) end
     end
+    if type(frame.GetSpellID) == "function" then
+        local ok, value = pcall(frame.GetSpellID, frame)
+        if ok then Add(value) end
+    end
+    return ids
+end
 
-    if DB.cdm then
-        self:TryFindCDMButtons()
+local function CDMFrameMatches(frame)
+    if not frame or not FrameCanBeUsed(frame) then return false end
+    local ids = GetCDMFrameSpellIDs(frame)
+    for i = 1, #ids do
+        if IsTargetFamilySpell(ids[i], true) then return true end
+    end
+    return false
+end
+
+local function RefreshCDMFrame(frame)
+    if not frame then return end
+    local state = GetFrameState(frame)
+    if DB.cdm and CDMFrameMatches(frame) then
+        state.isCDM = true
+        R.cdmFrames[frame] = true
+        EnsureAlert(frame)
+        if R.glowActive then ShowFrameGlow(frame) else HideFrameGlow(frame) end
     else
-        for i = 1, #self.extraButtons do
-            local f = self.extraButtons[i]
-            if f then f.__SDG_CDMTracked = nil end
-        end
-        WipeArray(self.extraButtons)
-        WipeMap(self._cdmLastSeen)
-    end
-
-    self:PrimeAlerts()
-    Debug(("Buttons mapped: actions=%d cdm=%d"):format(#self.trackedButtons, #self.extraButtons))
-
-    if wasActive then
-        self:ApplyGlowState()
+        HideFrameGlow(frame)
+        state.isCDM = false
+        R.cdmFrames[frame] = nil
     end
 end
 
-function SDG:RequestRescan(reason, deep)
-    -- Coalesce bursts of rescan triggers (bindings, talent swaps, page changes, etc.).
-    if reason then
-        self._rescanReason = reason
-    end
-    if deep then
-        self._rescanDeepQueued = true
-    end
+local CDM_VIEWER_NAMES = {
+    "EssentialCooldownViewer",
+    "UtilityCooldownViewer",
+    "BuffIconCooldownViewer",
+    "BuffBarCooldownViewer",
+}
 
-    if InCombat() then
-        self.needsRescan = true
-        if deep then self.pendingDeep = true end
-        if reason then Debug("Rescan deferred: " .. tostring(reason)) end
-        return
-    end
+local function EnumerateCDMViewer(viewer, seen)
+    if not viewer or not FrameCanBeUsed(viewer) then return true end
+    local pool = viewer.itemFramePool
+    if not pool or type(pool.EnumerateActive) ~= "function" then return false end
 
-    if self._rescanTimer then
-        return
-    end
-
-    local function Flush()
-        if not SDG then return end
-        SDG._rescanTimer = nil
-
-        local doDeep = SDG._rescanDeepQueued or SDG.pendingDeep
-        SDG._rescanDeepQueued = false
-        SDG.pendingDeep = nil
-
-        SDG:RescanButtons(doDeep)
-        SDG:UpdateBaselineCosts()
-        SDG:MarkUpdateDirty(SDG._rescanReason or "rescan", 0)
-        SDG._rescanReason = nil
-    end
-
-    if C_Timer and C_Timer.NewTimer then
-        self._rescanTimer = C_Timer.NewTimer(RESCAN_COALESCE_DELAY, Flush)
-    elseif C_Timer and C_Timer.After then
-        self._rescanTimer = true
-        C_Timer.After(RESCAN_COALESCE_DELAY, Flush)
-    else
-        Flush()
-    end
-end
-
-local function GetFrameSpellID(frame)
-    if not frame then return nil end
-
-    if frame.GetSpellID then
-        local ok, sid = pcall(frame.GetSpellID, frame)
-        if ok and type(sid) == "number" and not IsSecret(sid) then
-            return sid
-        end
-    end
-
-    local sid = frame.spellID or frame.spellId
-    if type(sid) == "number" and not IsSecret(sid) then
-        return sid
-    end
-
-    sid = frame.rangeCheckSpellID or frame.rangeCheckSpellId
-    if type(sid) == "number" and not IsSecret(sid) then
-        return sid
-    end
-
-    if type(frame.cooldownInfo) == "table" then
-        sid = frame.cooldownInfo.spellID or frame.cooldownInfo.spellId or frame.cooldownInfo.id
-        if type(sid) == "number" and not IsSecret(sid) then
-            return sid
-        end
-    end
-
-    return nil
-end
-
-function SDG:UpdatesActiveCDMFrames()
-    BuildProcCaches()
-
-    if not DB.cdm then
-        if type(self.extraButtons) == "table" then
-            for i = 1, #self.extraButtons do
-                local f = self.extraButtons[i]
-                if f then f.__SDG_CDMTracked = nil end
+    return pcall(function()
+        for frame in pool:EnumerateActive() do
+            if frame then
+                seen[frame] = true
+                RefreshCDMFrame(frame)
             end
-        end
-        WipeArray(self.extraButtons)
-        WipeMap(self._cdmLastSeen)
-        return
-    end
-
-    local now = (GetTime and GetTime()) or 0
-    local grace = 0.45
-    local lastSeen = self._cdmLastSeen
-
-    local viewers = {
-        _G.EssentialCooldownViewer,
-        _G.UtilityCooldownViewer,
-        _G.BuffIconCooldownViewer,
-    }
-
-    local activeFrames = {}
-    local activeSet = {}
-
-    local function PushUnique(frame)
-        if frame and not activeSet[frame] then
-            activeSet[frame] = true
-            activeFrames[#activeFrames + 1] = frame
-        end
-    end
-
-    for i = 1, #viewers do
-        local viewer = viewers[i]
-        if viewer and viewer.itemFramePool and viewer.itemFramePool.EnumerateActive then
-            for frame in viewer.itemFramePool:EnumerateActive() do
-                if frame and frame.IsShown and frame:IsShown() then
-                    local sid = GetFrameSpellID(frame)
-                    if type(sid) == "number" and self.procSpellSet[sid] then
-                        frame.__SDG_CDMTracked = true
-                        lastSeen[frame] = now
-                        PushUnique(frame)
-                    end
-                end
-            end
-        end
-    end
-
-    if #self.extraButtons > 0 then
-        for i = 1, #self.extraButtons do
-            local old = self.extraButtons[i]
-            if old and not activeSet[old] then
-                local seenAt = lastSeen[old] or 0
-                if (now - seenAt) <= grace then
-                    PushUnique(old)
-                else
-                    old.__SDG_CDMTracked = nil
-                    lastSeen[old] = nil
-                    if self.glowActive then
-                        SafeHideGlow(old)
-                    end
-                end
-            end
-        end
-    end
-
-    self.extraButtons = activeFrames
-end
-
-function SDG:TryFindCDMButtons()
-    self:UpdatesActiveCDMFrames()
-    if self.glowActive then
-        self:ApplyGlowState()
-    end
-end
-
-function SDG:StartCDMWatcher()
-    if self._cdmTicker then return end
-    if not (DB.cdm and C_Timer and C_Timer.NewTicker) then return end
-
-    self._cdmTicker = C_Timer.NewTicker(0.20, function()
-        if not SDG then return end
-        if not (SDG.glowActive and DB.cdm) then
-            SDG:StopCDMWatcher()
-            return
-        end
-
-        SDG:UpdatesActiveCDMFrames()
-        for i = 1, #SDG.extraButtons do
-            SafeShowGlow(SDG.extraButtons[i])
         end
     end)
 end
 
-function SDG:StopCDMWatcher()
-    if self._cdmTicker then
-        self._cdmTicker:Cancel()
-        self._cdmTicker = nil
-    end
-end
-
-function SDG:SetAuraState(active, stacks, spellID, source)
-    local prevA = self.auraActive
-    local prevS = self.auraStacks
-
-    self.auraActive = active and true or false
-    self.auraStacks = self.auraActive and (SafeNumber(stacks) or 1) or 0
-    self.auraSpellId = SafeNumber(spellID)
-    self.auraSource = source or "none"
-
-    return prevA ~= self.auraActive or prevS ~= self.auraStacks
-end
-
-function SDG:ScanAuraFull(reason)
-    if not DB.auraEnabled then
-        self.auraAuthoritative = true
-        self.auraReadFailed = false
-        return self:SetAuraState(false, 0, nil, "disabled")
-    end
-
-    local auraApiAvailable = false
-    local auraApiOperational = false
-
-    if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID and type(DB.auraIDs) == "table" then
-        auraApiAvailable = true
-        for i = 1, #DB.auraIDs do
-            local auraID = tonumber(DB.auraIDs[i])
-            if auraID then
-                local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, auraID)
-                if ok then
-                    auraApiOperational = true
-                end
-                if ok and aura then
-                    local stacks = aura.applications or aura.charges or aura.stackCount or 1
-                    self.auraAuthoritative = true
-                    self.auraReadFailed = false
-                    return self:SetAuraState(true, stacks, auraID, reason or "spellid")
-                end
-            end
-        end
-    end
-
-    
-    -- Fast-path: if spellID lookup API is present and operational, treat nil as authoritative 'not present'.
-    -- Avoid full index scans on every UNIT_AURA when the proc is not active.
-    if auraApiAvailable and auraApiOperational then
-        self.auraAuthoritative = true
-        self.auraReadFailed = false
-        return self:SetAuraState(false, 0, nil, reason or "spellid_none")
-    end
-
-    if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-        auraApiAvailable = true
-        for i = 1, 80 do
-            local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HELPFUL")
-            if ok then
-                auraApiOperational = true
-            end
-            if not ok or not aura then break end
-
-            local sid = SafeNumber(aura.spellId or aura.spellID)
-            if sid and self.auraIDSet[sid] then
-                local stacks = aura.applications or aura.charges or aura.stackCount or 1
-                self.auraAuthoritative = true
-                self.auraReadFailed = false
-                return self:SetAuraState(true, stacks, sid, reason or "index")
-            end
-        end
-    end
-
-    if UnitAura and type(DB.auraIDs) == "table" then
-        auraApiAvailable = true
-        auraApiOperational = true
-        for i = 1, 40 do
-            local _, _, count, _, _, _, _, _, _, sid = UnitAura("player", i, "HELPFUL")
-            if not sid then break end
-            sid = SafeNumber(sid)
-            if sid and self.auraIDSet[sid] then
-                self.auraAuthoritative = true
-                self.auraReadFailed = false
-                return self:SetAuraState(true, count or 1, sid, reason or "legacy")
-            end
-        end
-    end
-
-    self.auraReadFailed = auraApiAvailable and (not auraApiOperational) or false
-
-    if self.auraReadFailed and self.cleuAuraUpdatedAt and self.cleuAuraUpdatedAt > 0 then
-        local now = (GetTime and GetTime()) or 0
-        if (now - self.cleuAuraUpdatedAt) <= 12.0 then
-            self.auraAuthoritative = true
-            return self:SetAuraState(self.cleuAuraActive, self.cleuAuraStacks, self.cleuAuraSpellID, reason or "cleu_fallback")
-        end
-    end
-
-    self.auraAuthoritative = auraApiOperational and true or false
-    return self:SetAuraState(false, 0, nil, reason or (auraApiAvailable and "none" or "unavailable"))
-end
-
-function SDG:HasOverlayProc()
-    if type(self.overlayProcSpells) ~= "table" then
-        return false
-    end
-
-    local now = (GetTime and GetTime()) or 0
-    local hasActive = false
-    for sid, seenAt in pairs(self.overlayProcSpells) do
-        if type(seenAt) ~= "number" or (now - seenAt) > OVERLAY_SIGNAL_TTL then
-            self.overlayProcSpells[sid] = nil
-        else
-            hasActive = true
-        end
-    end
-
-    return hasActive
-end
-
-local function GetRunicPowerType()
-    if _G.Enum and _G.Enum.PowerType and _G.Enum.PowerType.RunicPower then
-        return _G.Enum.PowerType.RunicPower
-    end
-    return 6
-end
-
-local function GetSpellRunicCost(spellID)
-    if type(spellID) ~= "number" then return nil end
-
-    local rpType = GetRunicPowerType()
-
-    if C_Spell and C_Spell.GetSpellPowerCost then
-        local ok, costs = pcall(C_Spell.GetSpellPowerCost, spellID)
-        if ok and type(costs) == "table" then
-            for i = 1, #costs do
-                local c = costs[i]
-                if type(c) == "table" and c.type == rpType then
-                    local cost = SafeNumber(c.cost or c.minCost)
-                    if type(cost) == "number" then return cost end
-                end
-            end
-        end
-    end
-
-    if GetSpellPowerCost then
-        local ok, costs = pcall(GetSpellPowerCost, spellID)
-        if ok and type(costs) == "table" then
-            for i = 1, #costs do
-                local c = costs[i]
-                if type(c) == "table" and c.type == rpType then
-                    local cost = SafeNumber(c.cost or c.minCost)
-                    if type(cost) == "number" then return cost end
-                end
-            end
-        end
-    end
-
-    return nil
-end
-
-function SDG:UpdateBaselineCosts()
-    if #self.procConfiguredSpellIDs == 0 then
-        BuildProcCaches()
-    end
-
-    for i = 1, #self.procConfiguredSpellIDs do
-        local sid = self.procConfiguredSpellIDs[i]
-        local cost = GetSpellRunicCost(sid)
-        if type(cost) == "number" then
-            local prev = self.baseCost[sid]
-            if type(prev) ~= "number" or cost > prev then
-                self.baseCost[sid] = cost
-            end
-        end
-    end
-end
-
-function SDG:HasProcViaCost()
-    self:UpdateBaselineCosts()
-
-    local threshold = 1
-    for i = 1, #self.procConfiguredSpellIDs do
-        local sid = self.procConfiguredSpellIDs[i]
-        local base = self.baseCost[sid]
-        local cost = GetSpellRunicCost(sid)
-        if type(base) == "number" and type(cost) == "number" and cost <= (base - threshold) then
-            return true
-        end
-    end
-
-    return false
-end
-
-function SDG:ApplyGlowState()
-    self:CompactTrackedButtons()
-
-    if DB.cdm then
-        self:UpdatesActiveCDMFrames()
-    end
-
-    if self.glowActive then
-        for i = 1, #self.trackedButtons do
-            SafeShowGlow(self.trackedButtons[i])
-        end
-        for i = 1, #self.extraButtons do
-            SafeShowGlow(self.extraButtons[i])
-        end
-    else
-        for i = 1, #self.trackedButtons do
-            SafeHideGlow(self.trackedButtons[i])
-        end
-        for i = 1, #self.extraButtons do
-            SafeHideGlow(self.extraButtons[i])
-        end
-    end
-end
-
-function SDG:SetGlow(active, force)
-    local newState = active and true or false
-    if not force and newState == self.glowActive then return end
-
-    self.glowActive = newState
-    self:ApplyGlowState()
-
-    if DB.cdm and self.glowActive then
-        self:StartCDMWatcher()
-    else
-        self:StopCDMWatcher()
-    end
-end
-
-function SDG:UpdateFromSignals()
-    if not DB.enabled then
-        self.lastDetection = "none"
-        self:SetGlow(false)
+local function ReconcileCDMFrames()
+    if not DB.cdm then
+        for frame in pairs(R.cdmFrames) do RefreshCDMFrame(frame) end
         return
     end
 
-    local active = false
-    local det = "none"
+    local seen = NewWeakKeyTable()
+    local allReadable = true
+    local foundViewer = false
 
-    if DB.auraEnabled and self.auraActive then
-        active = true
-        det = "aura"
-    elseif DB.overlayEnabled and self:HasOverlayProc() then
-        active = true
-        det = "overlay"
-    elseif DB.costEnabled ~= false and InCombat() and self:HasProcViaCost() then
-        active = true
-        det = "cost"
-    end
-
-    self.lastDetection = det
-    self:SetGlow(active)
-end
-
-function SDG:MarkUpdateDirty(reason, delay)
-    self._updateDirty = true
-
-    if self._updateTimer then return end
-
-    local interval = delay
-    if interval == nil then interval = 0 end
-
-    local function Flush()
-        SDG._updateTimer = nil
-        if SDG._updateDirty then
-            SDG._updateDirty = false
-            SDG:UpdateFromSignals()
+    for i = 1, #CDM_VIEWER_NAMES do
+        local viewer = _G[CDM_VIEWER_NAMES[i]]
+        if viewer then
+            foundViewer = true
+            R.cdmViewers[viewer] = true
+            if not EnumerateCDMViewer(viewer, seen) then allReadable = false end
         end
     end
 
-    if interval <= 0 and C_Timer and C_Timer.After then
-        self._updateTimer = true
-        C_Timer.After(0, Flush)
-    elseif C_Timer and C_Timer.NewTimer then
-        self._updateTimer = C_Timer.NewTimer(interval, Flush)
-    elseif C_Timer and C_Timer.After then
-        self._updateTimer = true
-        C_Timer.After(interval, Flush)
+    -- A temporary inaccessible/transitioning pool must not erase correct state.
+    if foundViewer and allReadable then
+        for frame in pairs(R.cdmFrames) do
+            if not seen[frame] then
+                HideFrameGlow(frame)
+                local state = R.frameState[frame]
+                if state then state.isCDM = false end
+                R.cdmFrames[frame] = nil
+            end
+        end
+    end
+end
+
+local function AttachCDMHooks()
+    if R.cdmHooksAttached or type(hooksecurefunc) ~= "function" then
+        ReconcileCDMFrames()
+        return
+    end
+
+    local attached = false
+    local viewerMixin = _G.CooldownViewerMixin
+    if type(viewerMixin) == "table" and type(viewerMixin.OnAcquireItemFrame) == "function" then
+        hooksecurefunc(viewerMixin, "OnAcquireItemFrame", function(_, itemFrame)
+            if itemFrame then RefreshCDMFrame(itemFrame) end
+        end)
+        attached = true
+    end
+
+    local dataMixin = _G.CooldownViewerItemDataMixin
+    if type(dataMixin) == "table" then
+        if type(dataMixin.SetCooldownID) == "function" then
+            hooksecurefunc(dataMixin, "SetCooldownID", function(itemFrame)
+                RefreshCDMFrame(itemFrame)
+            end)
+            attached = true
+        end
+        if type(dataMixin.ClearCooldownID) == "function" then
+            hooksecurefunc(dataMixin, "ClearCooldownID", function(itemFrame)
+                RefreshCDMFrame(itemFrame)
+            end)
+            attached = true
+        end
+        if type(dataMixin.ResetCooldownData) == "function" then
+            hooksecurefunc(dataMixin, "ResetCooldownData", function(itemFrame)
+                RefreshCDMFrame(itemFrame)
+            end)
+            attached = true
+        end
+        if type(dataMixin.SetOverrideSpell) == "function" then
+            hooksecurefunc(dataMixin, "SetOverrideSpell", function(itemFrame)
+                RefreshCDMFrame(itemFrame)
+            end)
+            attached = true
+        end
+    end
+
+    R.cdmHooksAttached = attached
+    ReconcileCDMFrames()
+end
+
+local function ApplyGlowState()
+    CompactTrackedButtons()
+    for i = 1, #R.trackedButtons do
+        local button = R.trackedButtons[i]
+        if R.glowActive then ShowFrameGlow(button) else HideFrameGlow(button) end
+    end
+
+    if DB.cdm then ReconcileCDMFrames() end
+    for frame in pairs(R.cdmFrames) do
+        if R.glowActive then ShowFrameGlow(frame) else HideFrameGlow(frame) end
+    end
+end
+
+local function SetGlow(active, force)
+    active = active and true or false
+    if not force and active == R.glowActive then return end
+    R.glowActive = active
+    ApplyGlowState()
+end
+
+local function QueryOverlayState()
+    if not (C_SpellActivationOverlay and type(C_SpellActivationOverlay.IsSpellOverlayed) == "function") then
+        R.overlayQueryReadable = 0
+        R.overlayQueryCandidates = #R.signalFamilyList
+        R.overlayQueryAuthoritative = false
+        return false, false
+    end
+
+    local readable = 0
+    local candidates = #R.signalFamilyList
+    for i = 1, candidates do
+        local spellID = R.signalFamilyList[i]
+        local ok, overlayed = pcall(C_SpellActivationOverlay.IsSpellOverlayed, spellID)
+        if ok and IsAccessible(overlayed) and type(overlayed) == "boolean" then
+            readable = readable + 1
+            if overlayed then
+                R.overlayQueryReadable = readable
+                R.overlayQueryCandidates = candidates
+                R.overlayQueryAuthoritative = true
+                return true, true
+            end
+        end
+    end
+
+    R.overlayQueryReadable = readable
+    R.overlayQueryCandidates = candidates
+    R.overlayQueryAuthoritative = candidates > 0 and readable == candidates
+    return false, R.overlayQueryAuthoritative
+end
+
+local function HasEventSignal()
+    local now = Now()
+    local active = false
+    for spellID, seenAt in pairs(R.eventSignals) do
+        if type(seenAt) ~= "number" or now - seenAt > EVENT_FALLBACK_TTL then
+            R.eventSignals[spellID] = nil
+        else
+            active = true
+        end
+    end
+    return active
+end
+
+local function ReconcileGlow(reason)
+    if not DB.enabled then
+        R.lastDetection = "disabled"
+        SetGlow(false)
+        return
+    end
+
+    local now = Now()
+    if R.testUntil > now then
+        R.lastDetection = "test"
+        SetGlow(true)
+        return
+    end
+
+    local queryActive, queryAuthoritative = QueryOverlayState()
+    local eventActive = HasEventSignal()
+    local withinShowGrace = eventActive and (now - R.lastOverlayShowAt) <= OVERLAY_SHOW_GRACE
+
+    if queryActive then
+        R.lastDetection = "overlay-query"
+        SetGlow(true)
+    elseif eventActive and (withinShowGrace or not queryAuthoritative) then
+        R.lastDetection = withinShowGrace and "overlay-event-grace" or "overlay-event-fallback"
+        SetGlow(true)
     else
-        self._updateDirty = false
-        self:UpdateFromSignals()
+        if queryAuthoritative then ClearMap(R.eventSignals) end
+        R.lastDetection = queryAuthoritative and "overlay-query-off" or "no-readable-signal"
+        SetGlow(false)
     end
 
     if DB.debug and reason then
-        Debug("Dirty: " .. tostring(reason))
+        Log(("Reconcile %s: query=%s authoritative=%s event=%s -> %s")
+            :format(tostring(reason), tostring(queryActive), tostring(queryAuthoritative), tostring(eventActive), tostring(R.glowActive)))
     end
 end
 
-local function QueueSpellcastAuraRefresh()
-    if SDG._castRefreshPending then return end
-    SDG._castRefreshPending = true
-
-    local function Pass(reason, isLast)
-        if not SDG then return end
-        SDG:ScanAuraFull(reason)
-        if SDG.auraAuthoritative and not SDG.auraActive then
-            WipeMap(SDG.overlayProcSpells)
-        end
-        SDG:MarkUpdateDirty(reason, 0)
-        if isLast then
-            SDG._castRefreshPending = false
-        end
-    end
-
-    if C_Timer and C_Timer.After then
-        C_Timer.After(0, function() Pass("spellcast_hint_0", false) end)
-        C_Timer.After(0.06, function() Pass("spellcast_hint_1", false) end)
-        C_Timer.After(0.14, function() Pass("spellcast_hint_2", true) end)
-    else
-        Pass("spellcast_hint", true)
-    end
-end
-
-function SDG:HandleCombatLogAuraEvent()
-    if not CombatLogGetCurrentEventInfo then return end
-    if not self.playerGUID then return end
-    if not DB.auraEnabled then return end
-
-    local _, subEvent, _, _, _, _, _, destGUID, _, _, _, spellID, _, _, auraType, amount = CombatLogGetCurrentEventInfo()
-    if destGUID ~= self.playerGUID then return end
-    if type(spellID) ~= "number" or not self.auraIDSet[spellID] then return end
-    if auraType and auraType ~= "BUFF" then return end
-
-    local changed = false
-    local stacks = SafeNumber(amount)
-
-    if subEvent == "SPELL_AURA_APPLIED" then
-        self.cleuAuraActive = true
-        self.cleuAuraStacks = stacks or 1
-        changed = true
-    elseif subEvent == "SPELL_AURA_APPLIED_DOSE" then
-        self.cleuAuraActive = true
-        self.cleuAuraStacks = stacks or self.cleuAuraStacks or 1
-        if self.cleuAuraStacks < 1 then self.cleuAuraStacks = 1 end
-        changed = true
-    elseif subEvent == "SPELL_AURA_REMOVED_DOSE" then
-        self.cleuAuraStacks = stacks or 0
-        self.cleuAuraActive = self.cleuAuraStacks > 0
-        changed = true
-    elseif subEvent == "SPELL_AURA_REFRESH" then
-        self.cleuAuraActive = true
-        if not self.cleuAuraStacks or self.cleuAuraStacks < 1 then
-            self.cleuAuraStacks = stacks or 1
-        end
-        changed = true
-    elseif subEvent == "SPELL_AURA_REMOVED" then
-        self.cleuAuraActive = false
-        self.cleuAuraStacks = 0
-        changed = true
-    end
-
-    if not changed then return end
-
-    self.cleuAuraSpellID = spellID
-    self.cleuAuraUpdatedAt = (GetTime and GetTime()) or 0
-
-    if self.auraReadFailed or (not self.auraAuthoritative) then
-        self.auraAuthoritative = true
-        self:SetAuraState(self.cleuAuraActive, self.cleuAuraStacks, self.cleuAuraSpellID, "cleu")
-        self:MarkUpdateDirty("cleu", 0)
-    end
-end
-
-function SDG:AttachActionButtonCallback()
-    if self._actionChangedAttached then return end
-
-    if not (EventRegistry and EventRegistry.RegisterCallback) then
+local function QueueReconcile(reason, delay)
+    delay = delay or 0
+    if delay <= 0 then
+        ReconcileGlow(reason)
         return
     end
 
-    EventRegistry:RegisterCallback("ActionButton.OnActionChanged", function(_, button)
-        if not SDG or SDG.class ~= "DEATHKNIGHT" then return end
-        if not button then return end
+    if R.reconcileTimer and type(R.reconcileTimer.Cancel) == "function" then
+        pcall(R.reconcileTimer.Cancel, R.reconcileTimer)
+    end
+    R.reconcileTimer = nil
 
-        local slot = GetButtonActionSlot(button)
-        local shouldTrack = slot and SDG.trackedSlots[slot] or false
-        local tracked = SDG._trackedButtonSet[button] and true or false
+    local function Run()
+        R.reconcileTimer = nil
+        ReconcileGlow(reason)
+    end
 
-        if shouldTrack and not tracked then
-            AddTrackedButton(button)
-            if not InCombat() then
-                EnsureSDGAlert(button)
-                if SDG.glowActive then
-                    SafeShowGlow(button)
-                end
-            else
-                -- Do not create overlays in combat on protected action buttons.
-                if SDG.glowActive and button.__SDG_Alert then
-                    SafeShowGlow(button)
-                end
-                SDG.needsRescan = true
+    if C_Timer and type(C_Timer.NewTimer) == "function" then
+        R.reconcileTimer = C_Timer.NewTimer(delay, Run)
+    elseif C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(delay, Run)
+    else
+        Run()
+    end
+end
+
+local function SetEventSignal(spellID)
+    local now = Now()
+    R.eventSignals[spellID] = now
+    R.lastOverlayShowAt = now
+
+    local oldTimer = R.eventSignalTimers[spellID]
+    if oldTimer and type(oldTimer.Cancel) == "function" then pcall(oldTimer.Cancel, oldTimer) end
+    R.eventSignalTimers[spellID] = nil
+
+    local function Expire()
+        R.eventSignalTimers[spellID] = nil
+        if R.eventSignals[spellID] == now then
+            R.eventSignals[spellID] = nil
+            ReconcileGlow("event-ttl")
+        end
+    end
+
+    if C_Timer and type(C_Timer.NewTimer) == "function" then
+        R.eventSignalTimers[spellID] = C_Timer.NewTimer(EVENT_FALLBACK_TTL, Expire)
+    elseif C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(EVENT_FALLBACK_TTL, Expire)
+    end
+
+    -- SHOW is synchronous, but the query surface can lag behind the event within
+    -- the same frame. Re-evaluate once the short grace window closes so a readable
+    -- false cannot leave an event-only glow active until the long fallback TTL.
+    if C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(OVERLAY_SHOW_GRACE + 0.01, function()
+            if R.eventSignals[spellID] == now then
+                ReconcileGlow("show-grace-expired")
             end
-        elseif (not shouldTrack) and tracked then
+        end)
+    end
+end
+
+local function ClearEventSignal(spellID)
+    R.eventSignals[spellID] = nil
+    local timer = R.eventSignalTimers[spellID]
+    if timer and type(timer.Cancel) == "function" then pcall(timer.Cancel, timer) end
+    R.eventSignalTimers[spellID] = nil
+end
+
+local function HandleOverlayShow(spellID)
+    spellID = SafeNumber(spellID)
+    if not spellID then return end
+
+    if IsRelevantSignal(spellID) then
+        SetEventSignal(spellID)
+        ReconcileGlow("overlay-show")
+        QueueReconcile("overlay-show-delayed", OVERLAY_RECONCILE_DELAY)
+    else
+        -- An unrelated overlay event is only a wake-up signal. This catches a
+        -- newly hotfixed proc payload once the official query reports one of our
+        -- known action/replacement spells, without treating every overlay as Sudden Doom.
+        QueueReconcile("overlay-wakeup", OVERLAY_RECONCILE_DELAY)
+    end
+end
+
+local function HandleOverlayHide(spellID)
+    spellID = SafeNumber(spellID)
+    if not spellID then return end
+
+    if IsRelevantSignal(spellID) then
+        ClearEventSignal(spellID)
+        ReconcileGlow("overlay-hide")
+    end
+    QueueReconcile("overlay-hide-delayed", OVERLAY_RECONCILE_DELAY)
+end
+
+local function PrimeTrackedAlerts()
+    if InCombat() then return end
+    CompactTrackedButtons()
+    for i = 1, #R.trackedButtons do EnsureAlert(R.trackedButtons[i]) end
+    for frame in pairs(R.cdmFrames) do EnsureAlert(frame) end
+end
+
+function SDG:RescanButtons(deep)
+    if InCombat() then
+        R.needsRescan = true
+        R.pendingDeep = R.pendingDeep or deep
+        return
+    end
+
+    R.needsRescan = false
+    for i = 1, #R.trackedButtons do HideFrameGlow(R.trackedButtons[i]) end
+    ClearArray(R.trackedButtons)
+    R.trackedButtonSet = NewWeakKeyTable()
+
+    ScanActionSlots()
+    MapNamedButtons()
+    if deep then DeepMapButtons(25000) end
+
+    AttachCDMHooks()
+    ReconcileCDMFrames()
+    PrimeTrackedAlerts()
+    ApplyGlowState()
+
+    local slotCount = 0
+    for _ in pairs(R.trackedSlots) do slotCount = slotCount + 1 end
+    Log(("Rescan complete: slots=%d buttons=%d deep=%s")
+        :format(slotCount, #R.trackedButtons, tostring(deep and true or false)))
+end
+
+function SDG:RequestRescan(reason, deep)
+    R.rescanReason = reason or R.rescanReason
+    R.queuedDeep = R.queuedDeep or deep
+
+    if InCombat() then
+        R.needsRescan = true
+        R.pendingDeep = R.pendingDeep or deep
+        return
+    end
+
+    if R.rescanTimer then return end
+
+    local function Run()
+        R.rescanTimer = nil
+        local useDeep = R.queuedDeep or R.pendingDeep
+        R.queuedDeep = false
+        R.pendingDeep = false
+        local why = R.rescanReason
+        R.rescanReason = nil
+        SDG:RescanButtons(useDeep)
+        ReconcileGlow(why or "rescan")
+    end
+
+    if C_Timer and type(C_Timer.NewTimer) == "function" then
+        R.rescanTimer = C_Timer.NewTimer(RESCAN_DELAY, Run)
+    elseif C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(RESCAN_DELAY, Run)
+        R.rescanTimer = true
+    else
+        Run()
+    end
+end
+
+local function AttachActionButtonCallback()
+    if R.actionCallbackAttached then return end
+    if not (EventRegistry and type(EventRegistry.RegisterCallback) == "function") then return end
+
+    EventRegistry:RegisterCallback("ActionButton.OnActionChanged", function(_, button)
+        if R.class ~= "DEATHKNIGHT" or not button then return end
+        local matches = IsCurrentTargetButton(button)
+        if matches then
+            AddTrackedButton(button)
+            if not InCombat() then EnsureAlert(button) end
+            if R.glowActive then ShowFrameGlow(button) end
+        else
+            HideFrameGlow(button)
             if not InCombat() then
                 RemoveTrackedButton(button)
             else
-                -- Avoid transient combat remaps dropping tracked buttons mid-fight.
-                SDG.needsRescan = true
+                R.needsRescan = true
             end
         end
-    end, self)
+    end, R.actionCallbackOwner)
 
-    self._actionChangedAttached = true
+    R.actionCallbackAttached = true
 end
 
-function SDG:OnLogin()
-    if self._didLogin then return end
-    self._didLogin = true
+local frame = CreateFrame("Frame")
 
-    local _, class = UnitClass("player")
-    self.class = class
-    self.playerGUID = UnitGUID("player")
-
-    BuildProcCaches()
-    self:RebuildAuraIDSet()
-
-    if self.class ~= "DEATHKNIGHT" then
-        Debug("Non-DK class; addon idle")
-        self.lastDetection = "none"
-        self:SetGlow(false, true)
-        return
-    end
-
-    self:RegisterRuntimeEvents()
-    self:AttachActionButtonCallback()
-
-    self:RescanButtons(false)
-    self:UpdateBaselineCosts()
-    if #self.trackedButtons == 0 and C_Timer and C_Timer.After then
-        -- Avoid auto-deep scan: retry normal bar mapping after UI finishes late setup.
-        C_Timer.After(0.35, function()
-            if SDG and SDG.class == "DEATHKNIGHT" then
-                SDG:RequestRescan("login_retry_1", false)
-            end
-        end)
-        C_Timer.After(1.00, function()
-            if SDG and SDG.class == "DEATHKNIGHT" and #SDG.trackedButtons == 0 then
-                SDG:RequestRescan("login_retry_2", false)
-            end
-        end)
-    end
-
-    self:ScanAuraFull("login")
-    self:MarkUpdateDirty("login", 0)
-
-    if DB.cdm and C_Timer and C_Timer.After then
-        C_Timer.After(0.3, function()
-            if SDG then SDG:TryFindCDMButtons() end
-        end)
-    end
-
-    Debug(("Loaded buttons=%d cdm=%d"):format(#self.trackedButtons, #self.extraButtons))
-end
-
-local frame = _G.CreateFrame("Frame")
-
-function SDG:RegisterRuntimeEvents()
-    if frame.__SDG_RuntimeEventsRegistered then return end
-    frame.__SDG_RuntimeEventsRegistered = true
+local function RegisterRuntimeEvents()
+    if R.runtimeRegistered then return end
+    R.runtimeRegistered = true
 
     frame:RegisterEvent("PLAYER_ENTERING_WORLD")
     frame:RegisterEvent("PLAYER_REGEN_ENABLED")
@@ -1517,10 +1291,40 @@ function SDG:RegisterRuntimeEvents()
     frame:RegisterEvent("TRAIT_CONFIG_UPDATED")
     frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
     frame:RegisterEvent("SPELLS_CHANGED")
+    frame:RegisterEvent("SPELL_SECRECY_CHANGED")
+    frame:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
+    frame:RegisterEvent("COOLDOWN_VIEWER_TABLE_HOTFIXED")
     frame:RegisterEvent("ADDON_LOADED")
-
-    frame:RegisterUnitEvent("UNIT_AURA", "player")
     frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+end
+
+function SDG:OnLogin()
+    if R.didLogin then return end
+    R.didLogin = true
+
+    local _, class = UnitClass("player")
+    R.class = class
+    InitializeDB()
+    RebuildSpellFamilies()
+
+    if class ~= "DEATHKNIGHT" then
+        R.lastDetection = "non-dk"
+        SetGlow(false, true)
+        return
+    end
+
+    RegisterRuntimeEvents()
+    AttachActionButtonCallback()
+    AttachCDMHooks()
+    self:RescanButtons(false)
+    ReconcileGlow("login")
+
+    if #R.trackedButtons == 0 and C_Timer and type(C_Timer.After) == "function" then
+        C_Timer.After(0.35, function() SDG:RequestRescan("login-retry-1", false) end)
+        C_Timer.After(1.00, function()
+            if #R.trackedButtons == 0 then SDG:RequestRescan("login-retry-2", false) end
+        end)
+    end
 end
 
 local function OnEvent(_, event, ...)
@@ -1528,362 +1332,186 @@ local function OnEvent(_, event, ...)
         SDG:OnLogin()
         return
     end
+    if R.class ~= "DEATHKNIGHT" then return end
 
-    if SDG.class ~= "DEATHKNIGHT" then
-        return
-    end
-
-    if event == "PLAYER_ENTERING_WORLD" then
-        SDG:ScanAuraFull("enter_world")
-        SDG:MarkUpdateDirty("enter_world", 0)
-
-    elseif event == "PLAYER_REGEN_DISABLED" then
-        SDG:ScanAuraFull("enter_combat")
-        SDG:MarkUpdateDirty("enter_combat", 0)
-
-    elseif event == "PLAYER_REGEN_ENABLED" then
-        SDG:ScanAuraFull("leave_combat")
-        SDG:MarkUpdateDirty("leave_combat", 0)
-        if SDG.needsRescan then
-            SDG:RequestRescan("regen_enabled", SDG.pendingDeep)
+    if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
+        HandleOverlayShow(...)
+    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
+        HandleOverlayHide(...)
+    elseif event == "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED" then
+        local baseSpellID, overrideSpellID = ...
+        if LearnExplicitOverride(baseSpellID, overrideSpellID, event) then
+            SDG:RequestRescan(event, false)
         end
-
-    elseif event == "UNIT_AURA" then
-        local unit = ...
-        if unit == "player" then
-            SDG:ScanAuraFull("unit_aura")
-            SDG:MarkUpdateDirty("unit_aura", 0)
-        end
-
+        ReconcileGlow(event)
+    elseif event == "COOLDOWN_VIEWER_TABLE_HOTFIXED" then
+        RebuildSpellFamilies()
+        SDG:RequestRescan(event, false)
+    elseif event == "SPELL_SECRECY_CHANGED" then
+        RebuildSpellFamilies()
+        ReconcileGlow(event)
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
         local unit, _, spellID = ...
-        if unit == "player" and type(spellID) == "number" and SDG.procSpellSet[spellID] then
-            QueueSpellcastAuraRefresh()
+        if unit == "player" and IsTargetFamilySpell(spellID, true) then
+            QueueReconcile("spellcast", OVERLAY_RECONCILE_DELAY)
         end
-
-    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
-        local spellID = ...
-        if type(spellID) == "number" and (SDG.procSpellSet[spellID] or SDG.auraIDSet[spellID]) then
-            SDG.overlayProcSpells[spellID] = (GetTime and GetTime()) or 0
-            SDG:MarkUpdateDirty("overlay_show", 0)
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        PrimeTrackedAlerts()
+        if R.needsRescan then
+            SDG:RequestRescan(event, R.pendingDeep)
+        else
+            ReconcileCDMFrames()
+            ReconcileGlow(event)
         end
-
-    elseif event == "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE" then
-        local spellID = ...
-        if type(spellID) == "number" and SDG.overlayProcSpells[spellID] then
-            SDG.overlayProcSpells[spellID] = nil
-            SDG:MarkUpdateDirty("overlay_hide", 0)
-        end
-
-    elseif event == "ACTIONBAR_SLOT_CHANGED" or event == "ACTIONBAR_PAGE_CHANGED" or
-           event == "UPDATE_OVERRIDE_ACTIONBAR" or
-           event == "UPDATE_BONUS_ACTIONBAR" or event == "UPDATE_VEHICLE_ACTIONBAR" or
-           event == "UPDATE_BINDINGS" or event == "SPELLS_CHANGED" or
-           event == "PLAYER_SPECIALIZATION_CHANGED" or event == "PLAYER_TALENT_UPDATE" or
-           event == "TRAIT_CONFIG_UPDATED" then
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        ReconcileGlow(event)
+    elseif event == "PLAYER_ENTERING_WORLD" then
         SDG:RequestRescan(event, false)
-
+        ReconcileGlow(event)
     elseif event == "ADDON_LOADED" then
         local addonName = ...
         if addonName == "Blizzard_ActionBar" then
-            SDG:AttachActionButtonCallback()
-            SDG:RequestRescan("addon_loaded_actionbar", false)
-        elseif DB.cdm and type(addonName) == "string" and (addonName:find("Blizzard_Cooldown") or addonName:find("CooldownManager")) then
-            if C_Timer and C_Timer.After then
-                C_Timer.After(0.2, function()
-                    if SDG then SDG:TryFindCDMButtons() end
-                end)
-            else
-                SDG:TryFindCDMButtons()
-            end
+            AttachActionButtonCallback()
+            SDG:RequestRescan(event, false)
+        elseif addonName == CDM_ADDON then
+            AttachCDMHooks()
+            SDG:RequestRescan(event, false)
         end
+    elseif event == "ACTIONBAR_SLOT_CHANGED" or
+           event == "ACTIONBAR_PAGE_CHANGED" or
+           event == "UPDATE_OVERRIDE_ACTIONBAR" or
+           event == "UPDATE_BONUS_ACTIONBAR" or
+           event == "UPDATE_VEHICLE_ACTIONBAR" or
+           event == "UPDATE_BINDINGS" or
+           event == "PLAYER_TALENT_UPDATE" or
+           event == "TRAIT_CONFIG_UPDATED" or
+           event == "PLAYER_SPECIALIZATION_CHANGED" or
+           event == "SPELLS_CHANGED" then
+        RebuildSpellFamilies()
+        SDG:RequestRescan(event, false)
     end
 end
 
 frame:SetScript("OnEvent", OnEvent)
 frame:RegisterEvent("PLAYER_LOGIN")
 
-if _G.IsLoggedIn and _G.IsLoggedIn() then
+if type(_G.IsLoggedIn) == "function" and _G.IsLoggedIn() then
     SDG:OnLogin()
 end
 
 local function FormatIDList(list)
     if type(list) ~= "table" or #list == 0 then return "(empty)" end
-    local out = {}
-    for i = 1, #list do out[i] = tostring(list[i]) end
-    return table.concat(out, ",")
+    local result = {}
+    for i = 1, #list do result[i] = tostring(list[i]) end
+    return table.concat(result, ",")
 end
 
-local function DumpState()
-    local combat = InCombat()
-
-    Print("enabled=" .. tostring(DB.enabled) ..
-        " combat=" .. tostring(combat) ..
-        " buttons=" .. tostring(#SDG.trackedButtons) ..
-        " cdm=" .. tostring(#SDG.extraButtons) ..
-        " detection=" .. tostring(SDG.lastDetection) ..
-        " glow=" .. tostring(SDG.glowActive))
-
-    Print("aura: active=" .. tostring(SDG.auraActive) ..
-        " stacks=" .. tostring(SDG.auraStacks) ..
-        " spellID=" .. tostring(SDG.auraSpellId) ..
-        " source=" .. tostring(SDG.auraSource) ..
-        " authoritative=" .. tostring(SDG.auraAuthoritative) ..
-        " readFailed=" .. tostring(SDG.auraReadFailed))
-
-    Print("auraIDs: " .. FormatIDList(DB.auraIDs))
-    Print("procSpellIDs configured: " .. FormatIDList(SDG.procConfiguredSpellIDs))
-    Print("procSpellIDs resolved: " .. FormatIDList(SDG.procSpellList))
-
-    local overlay = {}
-    for sid in pairs(SDG.overlayProcSpells or {}) do
-        overlay[#overlay + 1] = tostring(sid)
-    end
-    table.sort(overlay)
-    Print("overlay: " .. (#overlay > 0 and table.concat(overlay, ",") or "(none)"))
-    Print("signals: aura=" .. tostring(SDG.auraActive) ..
-        " overlay=" .. tostring(SDG:HasOverlayProc()) ..
-        " cost=" .. tostring(SDG:HasProcViaCost()) ..
-        " costEnabled=" .. tostring(DB.costEnabled ~= false))
+local function CountWeakSet(set)
+    local count = 0
+    for _ in pairs(set) do count = count + 1 end
+    return count
 end
 
-local function DumpPlayerHelpfulAuras(filter)
-    filter = type(filter) == "string" and filter ~= "" and filter:lower() or nil
+local function DumpStatus()
+    Print(("version=%s schema=%d enabled=%s combat=%s glow=%s detection=%s")
+        :format(GetAddonVersion(), CURRENT_SCHEMA, tostring(DB.enabled), tostring(InCombat()), tostring(R.glowActive), tostring(R.lastDetection)))
+    Print(("buttons=%d cdm=%d query=%d/%d authoritative=%s eventSignals=%d")
+        :format(#R.trackedButtons, CountWeakSet(R.cdmFrames), R.overlayQueryReadable,
+            R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountWeakSet(R.eventSignals)))
+    Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
+    Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
+    Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
+end
 
-    Print("Player HELPFUL auras (name | spellID):")
-
-    if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-        for i = 1, 80 do
-            local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HELPFUL")
-            if not ok or not aura then break end
-
-            local sid = aura.spellId or aura.spellID
-            local nm = aura.name
-
-            local sidStr = "<unknown>"
-            if type(sid) == "number" then
-                sidStr = tostring(sid)
-            elseif sid ~= nil and IsSecret(sid) then
-                sidStr = "<secret>"
-            elseif sid ~= nil then
-                sidStr = tostring(sid)
-            end
-
-            local nameStr = "<unknown>"
-            if type(nm) == "string" and not IsSecret(nm) then
-                nameStr = nm
-            elseif nm ~= nil and IsSecret(nm) then
-                nameStr = "<secret>"
-            end
-
-            if not filter or (type(nameStr) == "string" and nameStr:lower():find(filter, 1, true)) then
-                Print(("%02d) %s | %s"):format(i, nameStr, sidStr))
-            end
-        end
+local function ToggleID(list, value, label)
+    local id = SafeNumber(value)
+    if not id or id < 1 then
+        Print("Usage: /sdglow " .. label .. " <spellID>")
         return
     end
 
-    if UnitAura then
-        for i = 1, 40 do
-            local name, _, _, _, _, _, _, _, _, sid = UnitAura("player", i, "HELPFUL")
-            if not name then break end
-            local nameStr = (type(name) == "string" and not IsSecret(name)) and name or "<secret>"
-            local sidStr = (type(sid) == "number") and tostring(sid) or "<unknown>"
-            if not filter or (type(nameStr) == "string" and nameStr:lower():find(filter, 1, true)) then
-                Print(("%02d) %s | %s"):format(i, nameStr, sidStr))
-            end
-        end
-    end
-end
-
-local function ToggleAuraID(id)
-    id = tonumber(id)
-    if not id then
-        Print("Usage: /sdglow aura <spellID>")
-        return
-    end
-
-    if type(DB.auraIDs) ~= "table" then DB.auraIDs = {} end
-
-    for i = 1, #DB.auraIDs do
-        if tonumber(DB.auraIDs[i]) == id then
-            table.remove(DB.auraIDs, i)
-            SDG:RebuildAuraIDSet()
-            SDG:ScanAuraFull("aura_list_changed")
-            SDG:MarkUpdateDirty("aura_list_changed", 0)
-            Print("Removed auraID " .. tostring(id) .. ". Now: " .. FormatIDList(DB.auraIDs))
+    for i = 1, #list do
+        if list[i] == id then
+            table.remove(list, i)
+            RebuildSpellFamilies()
+            SDG:RequestRescan(label .. "-removed", false)
+            ReconcileGlow(label .. "-removed")
+            Print("Removed " .. label .. " spellID " .. tostring(id))
             return
         end
     end
 
-    DB.auraIDs[#DB.auraIDs + 1] = id
-    SDG:RebuildAuraIDSet()
-    SDG:ScanAuraFull("aura_list_changed")
-    SDG:MarkUpdateDirty("aura_list_changed", 0)
-    Print("Added auraID " .. tostring(id) .. ". Now: " .. FormatIDList(DB.auraIDs))
+    list[#list + 1] = id
+    RebuildSpellFamilies()
+    SDG:RequestRescan(label .. "-added", false)
+    ReconcileGlow(label .. "-added")
+    Print("Added " .. label .. " spellID " .. tostring(id))
 end
 
-local function ToggleProcSpellID(id)
-    id = tonumber(id)
-    if not id then
-        Print("Usage: /sdglow spell <spellID>")
-        return
-    end
+_G.SLASH_SUDDEN_DOOM_GLOW1 = "/sdglow"
+_G.SlashCmdList["SUDDEN_DOOM_GLOW"] = function(message)
+    local command, argument = (message or ""):match("^(%S*)%s*(.-)%s*$")
+    command = (command or ""):lower()
 
-    if type(DB.procSpellIDs) ~= "table" then
-        DB.procSpellIDs = {}
-    end
-
-    for i = 1, #DB.procSpellIDs do
-        if tonumber(DB.procSpellIDs[i]) == id then
-            table.remove(DB.procSpellIDs, i)
-            BuildProcCaches()
-            SDG:RequestRescan("proc_spell_list_changed", false)
-            SDG:UpdateBaselineCosts()
-            SDG:MarkUpdateDirty("proc_spell_list_changed", 0)
-            Print("Removed proc spellID " .. tostring(id) .. ". Now: " .. FormatIDList(DB.procSpellIDs))
-            return
-        end
-    end
-
-    DB.procSpellIDs[#DB.procSpellIDs + 1] = id
-    BuildProcCaches()
-    SDG:RequestRescan("proc_spell_list_changed", false)
-    SDG:UpdateBaselineCosts()
-    SDG:MarkUpdateDirty("proc_spell_list_changed", 0)
-    Print("Added proc spellID " .. tostring(id) .. ". Now: " .. FormatIDList(DB.procSpellIDs))
-end
-
-SLASH_SUDDEN_DOOM_GLOW1 = "/sdglow"
-SlashCmdList["SUDDEN_DOOM_GLOW"] = function(msg)
-    msg = msg or ""
-
-    local cmd, arg = msg:match("^(%S+)%s*(.*)$")
-    cmd = (cmd or ""):lower()
-
-    if cmd == "" or cmd == "help" then
-        Print("Commands:")
-        Print("  /sdglow status")
-        Print("  /sdglow debug")
-        Print("  /sdglow aura <spellID>")
-        Print("  /sdglow spell <spellID>")
-        Print("  /sdglow spells")
-        Print("  /sdglow auras [filter]")
-        Print("  /sdglow rescan [deep]")
-        Print("  /sdglow test")
-        Print("  /sdglow cdm (on|off)")
-        Print("  /sdglow on | /sdglow off")
-        return
-    end
-
-    if cmd == "debug" then
+    if command == "" or command == "help" then
+        Print("/sdglow status | debug | rescan [deep] | test")
+        Print("/sdglow spell <spellID> | signal <spellID> | spells")
+        Print("/sdglow cdm on|off | on | off")
+    elseif command == "status" or command == "dump" then
+        DumpStatus()
+    elseif command == "debug" then
         DB.debug = not DB.debug
         Print("Debug: " .. (DB.debug and "ON" or "OFF"))
-
-        if SDG.Debug and SDG.Debug.CreateDebugFrame then
-            if DB.debug then
-                SDG.Debug:CreateDebugFrame()
-                if _G.SDG_DebugFrame then _G.SDG_DebugFrame:Show() end
-            else
-                if _G.SDG_DebugFrame then _G.SDG_DebugFrame:Hide() end
-            end
+        if SDG.DebugUI then
+            if DB.debug and type(SDG.DebugUI.Show) == "function" then SDG.DebugUI:Show() end
+            if not DB.debug and type(SDG.DebugUI.Hide) == "function" then SDG.DebugUI:Hide() end
         end
-        return
-    end
-
-    if cmd == "status" or cmd == "dump" then
-        DumpState()
-        return
-    end
-
-    if cmd == "spells" then
-        BuildProcCaches()
-        Print("procSpellIDs configured: " .. FormatIDList(SDG.procConfiguredSpellIDs))
-        Print("procSpellIDs resolved: " .. FormatIDList(SDG.procSpellList))
-        return
-    end
-
-    if cmd == "auras" then
-        DumpPlayerHelpfulAuras(arg ~= "" and arg or nil)
-        return
-    end
-
-    if cmd == "aura" then
-        ToggleAuraID(arg)
-        return
-    end
-
-    if cmd == "spell" then
-        ToggleProcSpellID(arg)
-        return
-    end
-
-    if cmd == "rescan" then
-        local deep = arg and arg:lower():find("deep", 1, true) ~= nil
-        SDG:RequestRescan("slash_rescan", deep)
-        if InCombat() then
-            Print("Rescan deferred (in combat)")
-        else
-            Print("Rescan done. buttons=" .. tostring(#SDG.trackedButtons) .. " cdm=" .. tostring(#SDG.extraButtons))
-        end
-        return
-    end
-
-    if cmd == "test" then
-        SDG:SetGlow(true, true)
-        if C_Timer and C_Timer.After then
-            C_Timer.After(2, function()
-                if SDG then SDG:MarkUpdateDirty("test_end", 0) end
-            end)
-        else
-            SDG:MarkUpdateDirty("test_end", 0)
-        end
-        Print("Test glow for 2s")
-        return
-    end
-
-    if cmd == "cdm" then
-        local newValue = not DB.cdm
-        if arg == "on" then newValue = true
-        elseif arg == "off" then newValue = false
-        end
-        DB.cdm = newValue
-
-        if DB.cdm then
-            SDG:TryFindCDMButtons()
-        else
-            SDG:StopCDMWatcher()
-            for i = 1, #SDG.extraButtons do
-                local f = SDG.extraButtons[i]
-                if f then
-                    f.__SDG_CDMTracked = nil
-                    SafeHideGlow(f)
+    elseif command == "rescan" then
+        local deep = argument:lower():find("deep", 1, true) ~= nil
+        SDG:RequestRescan("slash", deep)
+        Print(InCombat() and "Rescan deferred until combat ends" or "Rescan queued")
+    elseif command == "test" then
+        R.testToken = R.testToken + 1
+        local token = R.testToken
+        R.testUntil = Now() + 2.0
+        ReconcileGlow("test")
+        if C_Timer and type(C_Timer.After) == "function" then
+            C_Timer.After(2.05, function()
+                if R.testToken == token then
+                    R.testUntil = 0
+                    ReconcileGlow("test-end")
                 end
-            end
-            WipeArray(SDG.extraButtons)
-            WipeMap(SDG._cdmLastSeen)
+            end)
         end
-
-        SDG:ApplyGlowState()
-        Print("CDM mirror: " .. (DB.cdm and "ON" or "OFF"))
-        return
-    end
-
-    if cmd == "off" then
-        DB.enabled = false
-        SDG.lastDetection = "none"
-        SDG:SetGlow(false, true)
-        Print("Disabled")
-        return
-    end
-
-    if cmd == "on" then
+        Print("Test glow for 2 seconds")
+    elseif command == "spell" then
+        ToggleID(DB.targetSpellIDs, argument, "spell")
+    elseif command == "signal" or command == "aura" then
+        if command == "aura" then Print("'aura' is retained as an alias for 'signal'") end
+        ToggleID(DB.signalSpellIDs, argument, "signal")
+    elseif command == "spells" then
+        RebuildSpellFamilies()
+        Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
+        Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
+        Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
+    elseif command == "cdm" then
+        if argument == "on" then DB.cdm = true
+        elseif argument == "off" then DB.cdm = false
+        else DB.cdm = not DB.cdm end
+        AttachCDMHooks()
+        ReconcileCDMFrames()
+        ApplyGlowState()
+        Print("Cooldown Viewer mirror: " .. (DB.cdm and "ON" or "OFF"))
+    elseif command == "on" then
         DB.enabled = true
-        SDG:ScanAuraFull("slash_on")
-        SDG:MarkUpdateDirty("slash_on", 0)
+        ReconcileGlow("enabled")
         Print("Enabled")
-        return
+    elseif command == "off" then
+        DB.enabled = false
+        R.lastDetection = "disabled"
+        SetGlow(false, true)
+        Print("Disabled")
+    else
+        Print("Unknown command. Use /sdglow help")
     end
-
-    Print("Unknown command. Use /sdglow help")
 end
