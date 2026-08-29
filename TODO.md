@@ -12,7 +12,7 @@ The static/runtime harness is complete. The remaining items require a current Re
 - [ ] Verify Death Coil -> Necrotic Coil and Epidemic -> current Graveyard replacement paths after talent changes.
 - [ ] Verify Cooldown Viewer Essential, Utility, Tracked Buff Icon, and Buff Bar layouts during combat.
 - [ ] Verify viewer reorder, edit-mode resize, spec/talent swap, zoning, and pool reuse.
-- [ ] Verify Blizzard bars, ElvUI, Bartender4, Dominos, and the user's active UI stack.
+- [ ] Verify Blizzard bars, Bartender4, Dominos, and the user's active UI stack.
 - [ ] Verify combat page/state-driver transitions never glow an empty or unrelated button.
 - [ ] Verify no blocked action, forbidden-object, taint, or secret-value errors with only this addon enabled and with the full addon stack.
 - [ ] Profile event bursts and talent/page changes; confirm no visible hitch and no frame growth after repeated reload/rescan cycles.
