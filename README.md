@@ -47,7 +47,7 @@ Defaults:
 - Cooldown Viewer integration hooks pool/item lifecycle methods once; there is no recurring viewer scan or ticker.
 - A failed/inaccessible CDM pool pass never prunes previously valid frames.
 
-Supported named action-button families include Blizzard bars, ElvUI, Bartender4, and Dominos. `/sdglow rescan deep` is available for an unknown bar implementation and is never run automatically.
+Supported named action-button families include Blizzard bars, Bartender4, and Dominos. `/sdglow rescan deep` is available for an unknown bar implementation and is never run automatically.
 
 ## Commands
 
