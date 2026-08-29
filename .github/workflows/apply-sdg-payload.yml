@@ -1,0 +1,76 @@
+name: Apply Sudden Doom Glow payload
+
+on:
+  push:
+    branches:
+      - automation/sdg-1.3.1-payload
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-sdg-1.3.1-payload
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Restore and verify exact payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin automation/sdg-1.3.1-payload
+          rm -f /tmp/sdg-payload.tar.xz
+          for n in $(seq -w 0 10); do
+            git show "FETCH_HEAD:payload/part${n}" >> /tmp/sdg-payload.tar.xz
+          done
+          printf '%s  %s\n' \
+            '6384a1064a7c1d309fb0113fc15fe1fa1730ba971129648ccf030151e4e0ce0c' \
+            '/tmp/sdg-payload.tar.xz' | sha256sum -c -
+          rm -rf /tmp/sdg-payload
+          mkdir -p /tmp/sdg-payload
+          tar -xJf /tmp/sdg-payload.tar.xz -C /tmp/sdg-payload
+          test -f /tmp/sdg-payload/SuddenDoomGlow/Core.lua
+          test -f /tmp/sdg-payload/SuddenDoomGlow/tests/runtime_smoke.lua
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            /tmp/sdg-payload/SuddenDoomGlow/ ./
+
+      - name: Install Lua runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y liblua5.4-0 lua5.4
+
+      - name: Validate addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/static_checks.py
+          python3 tests/run_smoke.py
+          luac -p Core.lua Debug.lua tests/runtime_smoke.lua
+          git diff --check
+
+      - name: Commit and push main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'OpenAI'
+          git config user.email 'noreply@openai.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'Payload already present on main.'
+            exit 0
+          fi
+          git commit -m 'Update Sudden Doom Glow for Retail 12.1 (1.3.1)'
+          git push origin HEAD:main
