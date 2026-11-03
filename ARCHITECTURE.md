@@ -1,13 +1,13 @@
 # Architecture
 
-Release `1.4.0` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-02 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
+Release `1.4.0` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-03 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; current `live` head matches this pin. Live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
 
 ## Runtime flow
 
 ```mermaid
 flowchart TD
     Login[PLAYER_LOGIN] --> Family[Build configured spell families]
-    Family --> Mapping[Find candidate action slots and map buttons]
+    Family --> Mapping[Observe known buttons and current assignments]
     Login --> Viewer[Attach Cooldown Viewer instance hooks]
     Overlay[Overlay SHOW or HIDE] --> Arbitration[Query and event arbitration]
     Query[IsSpellOverlayed] --> Arbitration
@@ -28,7 +28,9 @@ The detection authority is the Spell Activation Overlay event/query pair. `SPELL
 
 ## Action buttons
 
-`C_ActionBar.FindSpellActionButtons` discovers candidate slots for each base spell. The addon reads the spell from an observed slot with `C_ActionBar.GetSpell`, with resolved macro spell support through the current macro API. A physical button is rendered only after its current assignment is readable and still belongs to the configured target family. Main/pageable action buttons and supported third-party bars prepare alerts before combat; static multibars allocate alerts only for matching spells. Named buttons remain discoverable for future assignment changes. Deep frame enumeration is manual.
+The addon discovers buttons through known named surfaces and observed current assignments. It reads the spell in a button's current slot with `C_ActionBar.GetSpell`; an ordinary result without a spell ID can fall back to `GetActionInfo` and `GetMacroSpell`. Failed or inaccessible queries remain unknown. A button is rendered only after its current readable assignment belongs to the configured target family. One weak `trackedButtons` set owns current matches and one weak `knownButtons` set owns observed surfaces. A relevant slot event updates that slot immediately; a single coalesced next-frame pass then rechecks all known buttons to cover provider update ordering. Deep frame enumeration is manual.
+
+Pageable bars prepare alerts outside combat; static Blizzard multibars allocate them only for matching spells.
 
 ## Cooldown Viewer
 
@@ -53,7 +55,7 @@ Alert creation, parenting, sizing, and anchoring happen outside combat. In comba
 | SavedVariables migration and options | `InitializeDB`, `GetOption`, `SetOption` in `Core.lua` |
 | Secret/access boundary | `IsAccessible`, `SafeNumber`, `FrameCanBeUsed` in `Core.lua` |
 | Spell family and override handling | `RebuildSpellFamilies`, `IsTargetFamilySpell`, `LearnExplicitOverride` in `Core.lua` |
-| Action slot and button mapping | `GetActionSpellID`, `ScanActionSlots`, `GetButtonSlot`, `MapNamedButtons` in `Core.lua` |
+| Action assignment and button mapping | `GetActionSpellID`, `GetButtonSlot`, `MapNamedButtons`, `RefreshKnownButtons` in `Core.lua` |
 | Glow ownership | `GetFrameState`, `EnsureAlert`, `ShowFrameGlow`, `HideFrameGlow` in `Core.lua` |
 | Cooldown Viewer | `CDMFrameMatches`, `ReconcileCDMFrames`, `HookCDMItem` in `Core.lua` |
 | Signal arbitration | `QueryOverlayState`, `SetEventSignal`, `ReconcileGlow` in `Core.lua` |

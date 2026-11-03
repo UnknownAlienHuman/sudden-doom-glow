@@ -5,7 +5,7 @@ Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto match
 - **Version:** 1.4.0
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
-- **Selected UI source:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5` (checked 2026-11-02)
+- **Selected UI source:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5` (checked 2026-11-03; live head matches)
 - **SavedVariables:** `SuddenDoomGlowDB`
 - **Optional dependency:** `Blizzard_CooldownViewer`
 
@@ -15,7 +15,7 @@ The TOC interface is target metadata. The addon's runtime client build has not b
 
 The addon listens to synchronous Spell Activation Overlay glow events and reconciles them against `C_SpellActivationOverlay.IsSpellOverlayed`. A readable `true` can turn the glow on. OFF is authoritative only when all configured candidates are readable and false. SHOW ordering receives a short grace; unavailable query state uses a bounded event fallback. Simultaneous spell IDs remain independent.
 
-Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. Action slots are discovered through `C_ActionBar.FindSpellActionButtons`; button assignments are checked again before a glow is shown. Macro text is not searched to infer a castable spell.
+Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. Relevant slot changes refresh immediately, followed by one coalesced next-frame pass over known buttons. Macro text is not searched to infer a castable spell.
 
 The addon owns the glow state and its frame metadata. Alert construction and geometry changes are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances and uses each item's configured base spell ID. Details and limits are in [API contracts](docs/API_CONTRACTS.md).
 

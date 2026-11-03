@@ -1,6 +1,6 @@
 # Live client checklist
 
-For release `1.4.0` targeting Retail 12.1.5 (expected interface `120105`). The selected source pin is build `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`, checked 2026-11-02; client status is **NOT-RUN**.
+For release `1.4.0` targeting Retail 12.1.5 (expected interface `120105`). The selected source pin is build `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`, checked 2026-11-03; client status is **NOT-RUN**.
 
 Record the actual client build/interface and addon status before testing. The expected TOC interface does not establish runtime compatibility. Append results to [VALIDATION.md](../VALIDATION.md).
 

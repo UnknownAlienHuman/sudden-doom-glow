@@ -63,9 +63,7 @@ local R = {
     signalFamilyList = {},
     explicitOverrides = {},
 
-    trackedSlots = {},
-    trackedButtons = {},
-    trackedButtonSet = NewWeakKeyTable(),
+    trackedButtons = NewWeakKeyTable(),
     knownButtons = NewWeakKeyTable(),
     frameState = NewWeakKeyTable(),
 
@@ -86,9 +84,8 @@ local R = {
     unsupportedSchema = false,
 
     needsRescan = false,
-    pendingDeep = false,
+    rescanDeep = false,
     rescanReason = nil,
-    queuedDeep = false,
 
     actionCallbackAttached = false,
     actionCallbackOwner = {},
@@ -134,6 +131,12 @@ local function ClearMap(t)
     for key in pairs(t) do
         t[key] = nil
     end
+end
+
+local function CountEntries(t)
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
 end
 
 -- Access checks precede nil comparisons, coercion, indexing and arithmetic.
@@ -322,7 +325,7 @@ end
 
 local function AddUniqueID(set, list, value)
     local id = SafeID(value)
-    if not id or id < 1 or set[id] then return false end
+    if not id or set[id] then return false end
     set[id] = true
     list[#list + 1] = id
     return true
@@ -333,7 +336,7 @@ local function AddTargetFamilyChain(spellID, depth)
     if depth > 8 then return end
 
     spellID = SafeID(spellID)
-    if not spellID or spellID < 1 then return end
+    if not spellID then return end
 
     if not AddUniqueID(R.targetFamily, R.targetFamilyList, spellID) then return end
     local baseID = GetBaseSpellID(spellID)
@@ -377,8 +380,6 @@ local function RebuildSpellFamilies()
     for i = 1, #DB.signalSpellIDs do
         AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i])
     end
-
-
 end
 
 local function IsTargetFamilySpell(spellID, learn)
@@ -481,27 +482,6 @@ local function SlotMatchesTarget(slot)
     return spellID and IsTargetFamilySpell(spellID, true) or false
 end
 
-local function TrackSlot(slot)
-    slot = SafeID(slot)
-    if slot then R.trackedSlots[slot] = true end
-end
-
-local function ScanActionSlots()
-    ClearMap(R.trackedSlots)
-    if not (C_ActionBar and type(C_ActionBar.FindSpellActionButtons) == "function") then return end
-    local queried = {}
-    for i = 1, #R.targetFamilyList do
-        local baseID = GetBaseSpellID(R.targetFamilyList[i])
-        if baseID and not queried[baseID] then
-            queried[baseID] = true
-            local ok, slots = pcall(C_ActionBar.FindSpellActionButtons, baseID)
-            if ok and IsAccessible(slots) and type(slots) == "table" then
-                for j = 1, #slots do TrackSlot(slots[j]) end
-            end
-        end
-    end
-end
-
 local function GetButtonSlot(button)
     if not FrameCanBeUsed(button) then return nil end
     -- The first assignment provider is authoritative. Never search stale alternate
@@ -532,9 +512,7 @@ end
 
 local function IsCurrentTargetButton(button)
     local slot = GetButtonSlot(button)
-    local matches = slot and SlotMatchesTarget(slot) or false
-    if matches then TrackSlot(slot) end
-    return matches, slot
+    return slot and SlotMatchesTarget(slot) or false
 end
 
 local function GetRenderTarget(frame)
@@ -559,9 +537,9 @@ local function GetFrameState(frame)
 end
 
 local function RefreshAlertGeometry(frame, state)
-    if InCombat() then return end
+    if InCombat() or not FrameCanBeUsed(state.alert) then return end
     local target = GetRenderTarget(frame)
-    if not target or not FrameCanBeUsed(target) or not state.alert then return end
+    if not target then return end
     if state.renderTarget ~= target and type(state.alert.SetParent) == "function" then
         state.alert:SetParent(target)
     end
@@ -593,16 +571,16 @@ local function RefreshAlertGeometry(frame, state)
 end
 
 local function EnsureAlert(frame)
-    if not frame or not FrameCanBeUsed(frame) then return nil end
+    if not FrameCanBeUsed(frame) then return nil end
     local state = GetFrameState(frame)
-    if state.alert then return state.alert end
+    if state.alert then return FrameCanBeUsed(state.alert) and state.alert or nil end
     if InCombat() then R.needsRescan = true; return nil end
     if type(CreateFrame) ~= "function" then return nil end
 
     local target = GetRenderTarget(frame)
     if not target or not FrameCanBeUsed(target) then return nil end
     local ok, alert = pcall(CreateFrame, "Frame", nil, target, "ActionButtonSpellAlertTemplate")
-    if not ok or not alert then
+    if not ok or not FrameCanBeUsed(alert) then
         Log("ActionButtonSpellAlertTemplate unavailable for a render target")
         return nil
     end
@@ -623,11 +601,11 @@ local function EnsureAlert(frame)
 end
 
 local function StopAnimation(animation)
-    if animation and type(animation.Stop) == "function" then pcall(animation.Stop, animation) end
+    if FrameCanBeUsed(animation) and type(animation.Stop) == "function" then pcall(animation.Stop, animation) end
 end
 
 local function PlayAnimation(animation)
-    if animation and type(animation.Play) == "function" then
+    if FrameCanBeUsed(animation) and type(animation.Play) == "function" then
         local ok = pcall(animation.Play, animation)
         return ok
     end
@@ -637,7 +615,7 @@ end
 local HideFrameGlow
 
 local function ShowFrameGlow(frame)
-    if not frame or not FrameCanBeUsed(frame) then return end
+    if not FrameCanBeUsed(frame) then HideFrameGlow(frame); return end
     local state = GetFrameState(frame)
     if not state.isCDM then
         local current = IsCurrentTargetButton(frame)
@@ -662,9 +640,11 @@ local function ShowFrameGlow(frame)
 end
 
 HideFrameGlow = function(frame)
-    if not frame then return end
+    -- Only the ordinary identity is needed to find our own presentation. An
+    -- inaccessible parent must not prevent hiding an accessible addon child.
+    if not IsAccessible(frame) or not frame then return end
     local state = R.frameState[frame]
-    if not state or not state.alert then return end
+    if not state or not FrameCanBeUsed(state.alert) then return end
     if not state.shown then
         pcall(state.alert.Hide, state.alert)
         return
@@ -677,28 +657,16 @@ HideFrameGlow = function(frame)
     state.shown = false
 end
 
-local function CompactTrackedButtons()
-    local nextIndex = 1
-    for i = 1, #R.trackedButtons do
-        local button = R.trackedButtons[i]
-        if R.trackedButtonSet[button] and FrameCanBeUsed(button) then
-            R.trackedButtons[nextIndex] = button
-            nextIndex = nextIndex + 1
-        end
+local function RefreshButton(button, slot)
+    if not IsAccessible(button) or not button then return end
+    if slot and SlotMatchesTarget(slot) then
+        R.trackedButtons[button] = true
+        EnsureAlert(button)
+        if R.glowActive then ShowFrameGlow(button) else HideFrameGlow(button) end
+    else
+        R.trackedButtons[button] = nil
+        HideFrameGlow(button)
     end
-    for i = #R.trackedButtons, nextIndex, -1 do R.trackedButtons[i] = nil end
-end
-
-local function AddTrackedButton(button)
-    if not button or R.trackedButtonSet[button] or not FrameCanBeUsed(button) then return end
-    R.trackedButtonSet[button] = true
-    R.trackedButtons[#R.trackedButtons + 1] = button
-end
-
-local function RemoveTrackedButton(button)
-    if not button or not R.trackedButtonSet[button] then return end
-    HideFrameGlow(button)
-    R.trackedButtonSet[button] = nil
 end
 
 local NAMED_BUTTON_SETS = {
@@ -725,11 +693,9 @@ local function MapNamedButtons()
             local button = _G[prefix .. index]
             if FrameCanBeUsed(button) then
                 R.knownButtons[button] = true
-                local matches = IsCurrentTargetButton(button)
                 -- Pageable bars need an existing overlay before a combat page
                 -- switch. Static Blizzard bars allocate only for current targets.
-                if matches or NAMED_BUTTON_SETS[setIndex][3] then EnsureAlert(button) end
-                if matches then AddTrackedButton(button) end
+                if NAMED_BUTTON_SETS[setIndex][3] then EnsureAlert(button) end
             end
         end
     end
@@ -740,8 +706,6 @@ local function MapNamedButtons()
             if FrameCanBeUsed(button) then
                 R.knownButtons[button] = true
                 EnsureAlert(button)
-                local matches = IsCurrentTargetButton(button)
-                if matches then AddTrackedButton(button) end
             end
         end
     end
@@ -759,7 +723,7 @@ local function DeepMapButtons(maxFrames)
             objectType = ok and SafeString(objectType) or nil
             if ok and (objectType == "Button" or objectType == "CheckButton") then
                 local matches = IsCurrentTargetButton(frame)
-                if matches then R.knownButtons[frame] = true; EnsureAlert(frame); AddTrackedButton(frame) end
+                if matches then R.knownButtons[frame] = true end
             end
         end
         frame = EnumerateFrames(frame)
@@ -777,6 +741,7 @@ local function CDMFrameMatches(frame)
 end
 
 local function ClearCDMFrame(frame)
+    if not IsAccessible(frame) or not frame then return end
     HideFrameGlow(frame)
     R.cdmFrames[frame] = nil
     local state = R.frameState[frame]
@@ -785,6 +750,7 @@ end
 
 local function RefreshCDMFrame(frame)
     if not RuntimeEnabled() or not DB.cdm then return end
+    if not IsAccessible(frame) or not frame then return end
     local matches = CDMFrameMatches(frame)
     if matches == nil then
         -- Keep membership when identity cannot be read, but do not render an
@@ -868,17 +834,14 @@ local function ReconcileCDMFrames()
     end
     if foundViewer and allReadable then
         for item in pairs(R.cdmFrames) do
-            if not seen[item] then ClearCDMFrame(item) end
+            if IsAccessible(item) and not seen[item] then ClearCDMFrame(item) end
         end
     end
 end
 
 local function ApplyGlowState()
-    for i = 1, #R.trackedButtons do
-        local button = R.trackedButtons[i]
-        if R.trackedButtonSet[button] then
-            if R.glowActive then ShowFrameGlow(button) else HideFrameGlow(button) end
-        end
+    for button in pairs(R.trackedButtons) do
+        if R.glowActive then ShowFrameGlow(button) else HideFrameGlow(button) end
     end
     -- Proc events touch the tracked set only; pool enumeration belongs to lifecycle
     -- setup/recovery, never to the hot glow path.
@@ -1043,14 +1006,18 @@ end
 local function PrimeTrackedAlerts()
     if InCombat() then R.needsGeometry = true; return end
     for button in pairs(R.knownButtons) do
-        if R.trackedButtonSet[button] then EnsureAlert(button) end
-        local state = R.frameState[button]
-        if state then RefreshAlertGeometry(button, state) end
+        if IsAccessible(button) then
+            if R.trackedButtons[button] then EnsureAlert(button) end
+            local state = R.frameState[button]
+            if state then RefreshAlertGeometry(button, state) end
+        end
     end
     for item in pairs(R.cdmFrames) do
-        EnsureAlert(item)
-        local state = R.frameState[item]
-        if state then RefreshAlertGeometry(item, state) end
+        if IsAccessible(item) then
+            EnsureAlert(item)
+            local state = R.frameState[item]
+            if state then RefreshAlertGeometry(item, state) end
+        end
     end
     R.needsGeometry = false
 end
@@ -1060,50 +1027,42 @@ local function RefreshKnownButtons(changedSlot)
     for button in pairs(R.knownButtons) do
         local slot = GetButtonSlot(button)
         if not changedSlot or slot == changedSlot then
-            if slot and SlotMatchesTarget(slot) then
-                TrackSlot(slot)
-                AddTrackedButton(button)
-                if R.glowActive then ShowFrameGlow(button) end
-            else
-                RemoveTrackedButton(button)
-            end
+            RefreshButton(button, slot)
         end
     end
-    CompactTrackedButtons()
 end
 
 function SDG:RescanButtons(deep)
     if not RuntimeEnabled() then return end
     if InCombat() then
         R.needsRescan = true
-        R.pendingDeep = R.pendingDeep or deep
+        R.rescanDeep = R.rescanDeep or deep
         return
     end
     R.needsRescan = false
     RebuildSpellFamilies()
-    ScanActionSlots()
     MapNamedButtons()
     if deep then DeepMapButtons(25000) end
     RefreshKnownButtons()
     ReconcileCDMFrames()
     PrimeTrackedAlerts()
-    ApplyGlowState()
-    Log(("Rescan: buttons=%d deep=%s"):format(#R.trackedButtons, tostring(not not deep)))
+    if DB.debug then
+        Log(("Rescan: buttons=%d deep=%s"):format(CountEntries(R.trackedButtons), tostring(not not deep)))
+    end
 end
 
 function SDG:RequestRescan(reason, deep)
     if not RuntimeEnabled() then return end
     R.rescanReason = reason or R.rescanReason
-    R.queuedDeep = R.queuedDeep or deep
+    R.rescanDeep = R.rescanDeep or deep
     if InCombat() then
         R.needsRescan = true
-        R.pendingDeep = R.pendingDeep or deep
         return
     end
     if R.timers.rescan then return end
     ScheduleTimer("rescan", RESCAN_DELAY, function()
-        local useDeep = R.queuedDeep or R.pendingDeep
-        R.queuedDeep, R.pendingDeep = false, false
+        local useDeep = R.rescanDeep
+        R.rescanDeep = false
         local why = R.rescanReason
         R.rescanReason = nil
         self:RescanButtons(useDeep)
@@ -1116,14 +1075,7 @@ local function AttachActionButtonCallback()
     EventRegistry:RegisterCallback("ActionButton.OnActionChanged", function(_, button)
         if not RuntimeEnabled() or not FrameCanBeUsed(button) then return end
         R.knownButtons[button] = true
-        if IsCurrentTargetButton(button) then
-            AddTrackedButton(button)
-            if not InCombat() then EnsureAlert(button) end
-            if R.glowActive then ShowFrameGlow(button) end
-        else
-            RemoveTrackedButton(button)
-        end
-        CompactTrackedButtons()
+        RefreshButton(button, GetButtonSlot(button))
     end, R.actionCallbackOwner)
     R.actionCallbackAttached = true
 end
@@ -1143,7 +1095,7 @@ local function ResetTransientState(clearOverrides)
     CancelTimers()
     ClearMap(R.eventSignals)
     R.lastQueryActiveAt, R.testUntil = nil, 0
-    R.needsRescan, R.pendingDeep, R.queuedDeep = false, false, false
+    R.needsRescan, R.rescanDeep = false, false
     R.rescanReason = nil
     if clearOverrides then ClearMap(R.explicitOverrides) end
     SetGlow(false, true)
@@ -1159,9 +1111,7 @@ local function StopRuntime()
     end
     ResetTransientState(true)
     for item in pairs(R.cdmFrames) do ClearCDMFrame(item) end
-    ClearArray(R.trackedButtons)
-    ClearMap(R.trackedButtonSet)
-    ClearMap(R.trackedSlots)
+    ClearMap(R.trackedButtons)
     R.lastDetection = "disabled"
 end
 
@@ -1171,13 +1121,15 @@ local function StartRuntime()
     for i = 1, #RUNTIME_EVENTS do frame:RegisterEvent(RUNTIME_EVENTS[i]) end
     frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
     AttachActionButtonCallback()
-    RebuildSpellFamilies()
-    SDG:RescanButtons(false)
     if InCombat() then
         -- Re-enable prepared surfaces without waiting for another proc or page
         -- event. Missing alerts remain deferred until structural work is allowed.
+        RebuildSpellFamilies()
+        R.needsRescan = true
         RefreshKnownButtons()
         ReconcileCDMFrames()
+    else
+        SDG:RescanButtons(false)
     end
     ReconcileGlow("enabled")
 end
@@ -1206,7 +1158,6 @@ function SDG:SetOption(key, value)
         if value then StartRuntime() else StopRuntime() end
     elseif key == "cdm" then
         ReconcileCDMFrames()
-        ApplyGlowState()
     elseif key == "glowScale" then
         if RuntimeEnabled() then PrimeTrackedAlerts() end
     elseif key == "debug" and self.DebugUI then
@@ -1234,11 +1185,14 @@ function SDG:OnLogin()
     local _, class = UnitClass("player")
     R.class = SafeString(class)
     InitializeDB()
-    RebuildSpellFamilies()
     if type(self.RegisterSettings) == "function" then self:RegisterSettings() end
-    if R.class ~= "DEATHKNIGHT" then R.lastDetection = "non-dk"; return end
+    if not RuntimeEnabled() then
+        RebuildSpellFamilies()
+        R.lastDetection = R.class == "DEATHKNIGHT" and "disabled" or "non-dk"
+        return
+    end
     StartRuntime()
-    if RuntimeEnabled() and #R.trackedButtons == 0 then
+    if not next(R.trackedButtons) then
         ScheduleTimer("login-retry", 0.35, function() self:RequestRescan("login-ready", false) end)
     end
 end
@@ -1262,7 +1216,7 @@ local function OnEvent(_, event, ...)
         QueueReconcile("spellcast", OVERLAY_RECONCILE_DELAY)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if R.needsGeometry then PrimeTrackedAlerts() end
-        if R.needsRescan then SDG:RequestRescan(event, R.pendingDeep)
+        if R.needsRescan then SDG:RequestRescan(event)
         else ReconcileGlow(event) end
     elseif event == "PLAYER_REGEN_DISABLED" then
         ReconcileGlow(event)
@@ -1287,10 +1241,13 @@ local function OnEvent(_, event, ...)
         ReconcileGlow(event)
     else
         local changedSlot = event == "ACTIONBAR_SLOT_CHANGED" and SafeID((...)) or nil
-        if changedSlot then R.trackedSlots[changedSlot] = nil end
         RefreshKnownButtons(changedSlot)
         -- Bar providers can update their assignment after our native event handler.
-        ScheduleTimer("action-refresh", 0, function() RefreshKnownButtons(changedSlot) end)
+        -- One unfiltered pass covers every slot in a burst without retaining
+        -- event arguments or replacing the pending timer on each invalidation.
+        if not R.timers["action-refresh"] then
+            ScheduleTimer("action-refresh", 0, RefreshKnownButtons)
+        end
         QueueReconcile(event, OVERLAY_RECONCILE_DELAY)
     end
 end
@@ -1305,12 +1262,6 @@ local function FormatIDList(list)
     return table.concat(result, ",")
 end
 
-local function CountWeakSet(set)
-    local count = 0
-    for _ in pairs(set) do count = count + 1 end
-    return count
-end
-
 local function DumpStatus()
     if type(_G.GetBuildInfo) == "function" then
         local version, build, _, interface = _G.GetBuildInfo()
@@ -1321,8 +1272,8 @@ local function DumpStatus()
     Print(("version=%s schema=%d enabled=%s combat=%s glow=%s detection=%s")
         :format(GetAddonVersion(), CURRENT_SCHEMA, tostring(DB.enabled), tostring(InCombat()), tostring(R.glowActive), tostring(R.lastDetection)))
     Print(("buttons=%d cdm=%d query=%d/%d authoritative=%s eventSignals=%d")
-        :format(#R.trackedButtons, CountWeakSet(R.cdmFrames), R.overlayQueryReadable,
-            R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountWeakSet(R.eventSignals)))
+        :format(CountEntries(R.trackedButtons), CountEntries(R.cdmFrames), R.overlayQueryReadable,
+            R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountEntries(R.eventSignals)))
     Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
     Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
     Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
@@ -1330,7 +1281,7 @@ end
 
 local function ToggleID(list, value, label)
     local id = SafeID(value)
-    if not id or id < 1 then
+    if not id then
         Print("Usage: /sdglow " .. label .. " <spellID>")
         return
     end

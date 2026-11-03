@@ -14,8 +14,25 @@ local unpackValues = table.unpack or unpack
 local secretValue = { secret = true }
 local actionGetSpellCalls = 0
 local structuralViolations = 0
+local inaccessibleAlertMutations = 0
+local deepEnumerationStarts = 0
+local deepEnumerationItems = {}
+
+local function AlertOwner(value)
+    if value.template == "ActionButtonSpellAlertTemplate" then return value end
+    return value.alertOwner
+end
+
+local function AssertAlertAccessible(value, operation)
+    local alert = AlertOwner(value)
+    if alert and alert.accessible == false then
+        inaccessibleAlertMutations = inaccessibleAlertMutations + 1
+        error(operation .. " touched an inaccessible addon alert")
+    end
+end
 
 local function AssertOutsideCombat(frame, operation)
+    AssertAlertAccessible(frame, operation)
     if inCombat and frame.template == "ActionButtonSpellAlertTemplate" then
         structuralViolations = structuralViolations + 1
         error(operation .. " mutated an alert frame in combat")
@@ -23,14 +40,26 @@ local function AssertOutsideCombat(frame, operation)
 end
 
 local function NewAnimation()
-    return {
+    local animation = {
+        accessible = true,
         playing = false,
         playCount = 0,
-        Play = function(self) self.playing = true; self.playCount = self.playCount + 1 end,
-        Stop = function(self) self.playing = false end,
+        Play = function(self)
+            AssertAlertAccessible(self, "Play")
+            self.playing = true
+            self.playCount = self.playCount + 1
+        end,
+        Stop = function(self)
+            AssertAlertAccessible(self, "Stop")
+            self.playing = false
+        end,
         IsPlaying = function(self) return self.playing end,
+        CanBeAccessedInContext = function(self)
+            return self.accessible ~= false and (not self.alertOwner or self.alertOwner.accessible ~= false)
+        end,
         SetScript = function(self, script, callback) self[script] = callback end,
     }
+    return animation
 end
 
 local function NewFrame(name, parent, template)
@@ -56,7 +85,6 @@ local function NewFrame(name, parent, template)
     function frame:GetName() return self.name end
     function frame:GetObjectType() return "Button" end
     function frame:IsForbidden() return false end
-    function frame:CanBeAccessedInContext() return true end
     function frame:GetSize() return self.width, self.height end
     function frame:SetSize(width, height) AssertOutsideCombat(self, "SetSize"); self.width, self.height = width, height end
     function frame:SetAllPoints(relative) AssertOutsideCombat(self, "SetAllPoints"); self.allPoints = relative or true end
@@ -65,18 +93,22 @@ local function NewFrame(name, parent, template)
     function frame:SetFrameLevel(level) AssertOutsideCombat(self, "SetFrameLevel"); self.frameLevel = level end
     function frame:GetFrameLevel() return self.frameLevel end
     function frame:SetFrameStrata(value) AssertOutsideCombat(self, "SetFrameStrata"); self.frameStrata = value end
-    function frame:Show() self.shown = true end
-    function frame:Hide() self.shown = false end
+    function frame:Show() AssertAlertAccessible(self, "Show"); self.shown = true end
+    function frame:Hide() AssertAlertAccessible(self, "Hide"); self.shown = false end
     function frame:IsShown() return self.shown end
     function frame:GetPagedID() return self.pagedAction or self.action end
     function frame:GetAction() return self.action end
     function frame:GetAttribute(key) return self.attributes[key] or (key == "action" and self.action or nil) end
-    function frame:CanBeAccessedInContext() return self.accessible ~= false end
+    function frame:CanBeAccessedInContext()
+        return self.accessible ~= false and self.contextAccessible ~= false
+    end
 
     if template == "ActionButtonSpellAlertTemplate" then
         frame.shown = false
         frame.ProcStartAnim = NewAnimation()
         frame.ProcLoop = NewAnimation()
+        frame.ProcStartAnim.alertOwner = frame
+        frame.ProcLoop.alertOwner = frame
     end
     return frame
 end
@@ -89,6 +121,17 @@ function CreateFrame(_, name, parent, template)
     local frame = NewFrame(name, parent, template)
     createdFrames[#createdFrames + 1] = frame
     return frame
+end
+
+function EnumerateFrames(previous)
+    if previous == nil then
+        deepEnumerationStarts = deepEnumerationStarts + 1
+        return deepEnumerationItems[1]
+    end
+    for index, frame in ipairs(deepEnumerationItems) do
+        if frame == previous then return deepEnumerationItems[index + 1] end
+    end
+    return nil
 end
 
 function GetTime() return now end
@@ -188,6 +231,9 @@ local actions = {
     [2] = { "spell", 99999 },
     [13] = { "spell", 207317 },
     [4] = { "macro", 42 },
+    [50] = { "spell", 99999 },
+    [51] = { "spell", 99999 },
+    [60] = { "spell", 47541 },
 }
 function GetActionInfo(slot)
     local action = actions[slot]
@@ -203,16 +249,6 @@ end
 function GetMacroSpell() return nil end
 
 C_ActionBar = {}
-function C_ActionBar.FindSpellActionButtons(spellID)
-    local slots = {}
-    for slot, action in pairs(actions) do
-        if action[1] == "spell" and C_Spell.GetBaseSpell(action[2]) == spellID then
-            slots[#slots + 1] = slot
-        end
-    end
-    table.sort(slots)
-    return slots
-end
 function C_ActionBar.GetSpell(slot)
     actionGetSpellCalls = actionGetSpellCalls + 1
     local action = actions[slot]
@@ -289,6 +325,13 @@ ActionButton2 = NewFrame("ActionButton2")
 ActionButton2.action = 2
 ActionButton3 = NewFrame("ActionButton3")
 ActionButton3.action = 4
+ActionButton4 = NewFrame("ActionButton4")
+ActionButton4.action = 50
+ActionButton5 = NewFrame("ActionButton5")
+ActionButton5.action = 51
+local deepOnlyButton = NewFrame("DeepOnlyButton")
+deepOnlyButton.action = 60
+deepEnumerationItems[1] = deepOnlyButton
 MultiBarBottomLeftButton1 = NewFrame("MultiBarBottomLeftButton1")
 MultiBarBottomLeftButton1.action = 13
 
@@ -349,20 +392,23 @@ assert(type(defaultGlowScale) == "number", "glow scale setting missing")
 SDG:SetOption("glowScale", 1.5)
 assert(SDG:GetOption("glowScale") == 1.5, "glow scale option did not persist")
 SDG:SetOption("glowScale", defaultGlowScale)
-assert(R.trackedButtonSet[ActionButton1], "Death Coil button not tracked")
-assert(R.trackedButtonSet[MultiBarBottomLeftButton1], "Epidemic button not tracked")
+assert(R.frameState[ActionButton1] and R.frameState[ActionButton1].alert,
+    "Death Coil alert was not prepared")
+assert(R.frameState[MultiBarBottomLeftButton1] and R.frameState[MultiBarBottomLeftButton1].alert,
+    "Epidemic alert was not prepared")
 assert(R.cdmFrames[cdmItem], "Cooldown Viewer item not tracked")
 assert(actionGetSpellCalls > 0, "current action slots were not resolved through C_ActionBar.GetSpell")
-R.trackedSlots[4] = true
 local callback = assert(actionCallbacks["ActionButton.OnActionChanged"]).callback
 callback(nil, ActionButton3)
-assert(not R.trackedButtonSet[ActionButton3], "macro comment mentioning a target spell was treated as an action")
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(not (R.frameState[ActionButton3] and R.frameState[ActionButton3].shown),
+    "macro comment mentioning a target spell was treated as an action")
 
 -- Secret identifiers must be rejected before any numeric/type comparison.
 ActionButton3.action = secretValue
 local secretCallbackOK = pcall(actionCallbacks["ActionButton.OnActionChanged"].callback, nil, ActionButton3)
 assert(secretCallbackOK, "secret action identifier raised during current-slot validation")
-assert(not R.trackedButtonSet[ActionButton3], "inaccessible secret action was tracked")
 ActionButton3.action = 4
 
 -- Official query ON and idempotent rendering.
@@ -422,6 +468,27 @@ Advance(30.0)
 assert(not R.glowActive, "event fallback TTL did not clear stale glow")
 C_SpellActivationOverlay.IsSpellOverlayed = queryFunction
 
+-- A temporarily unreadable button must resume rendering when access returns.
+-- A different button callback forces the old compaction path.
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+ActionButton1.accessible = false
+callback(nil, MultiBarBottomLeftButton1)
+ActionButton1.accessible = true
+callback(nil, ActionButton1)
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.frameState[ActionButton1] and R.frameState[ActionButton1].shown,
+    "temporarily inaccessible button could not reenter glow rendering")
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(not R.frameState[ActionButton1].shown, "OFF transition left the restored button glowing")
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.frameState[ActionButton1].shown, "restored button did not glow after an OFF-to-ON cycle")
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+
 -- Explicit current-client override event adds a replacement and maps its button.
 baseMap[777001] = 47541
 spellNames[777001] = "Hotfixed Coil"
@@ -431,7 +498,79 @@ Fire("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED", 47541, 777001)
 Advance(0.10)
 assert(R.targetFamily[777001], "explicit override was not learned")
 callback(nil, ActionButton2)
-assert(R.trackedButtonSet[ActionButton2], "override action button not tracked")
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.frameState[ActionButton2] and R.frameState[ActionButton2].shown,
+    "override action button did not render after reassignment")
+
+-- Two native action changes arrive before their bar provider publishes the new
+-- spells. The coalesced deferred refresh must recheck both known buttons.
+callback(nil, ActionButton4)
+callback(nil, ActionButton5)
+Fire("ACTIONBAR_SLOT_CHANGED", 50)
+Fire("ACTIONBAR_SLOT_CHANGED", 51)
+actions[50] = { "spell", 47541 }
+actions[51] = { "spell", 207317 }
+Advance(0)
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.frameState[ActionButton4] and R.frameState[ActionButton4].shown,
+    "burst refresh lost the late assignment for action slot A")
+assert(R.frameState[ActionButton5] and R.frameState[ActionButton5].shown,
+    "burst refresh lost the late assignment for action slot B")
+
+-- Parent context access can fail while our own alert remains accessible. Proc OFF
+-- and addon disable must still hide that alert child.
+local primaryAlert = assert(R.frameState[ActionButton1].alert)
+assert(primaryAlert.shown, "precondition: primary alert should be visible")
+ActionButton1.contextAccessible = false
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(not primaryAlert.shown, "inaccessible external parent prevented hiding the addon alert")
+ActionButton1.contextAccessible = true
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(primaryAlert.shown, "precondition: primary alert did not show before disable")
+ActionButton1.contextAccessible = false
+assert(SDG:SetOption("enabled", false), "could not disable addon for parent access test")
+assert(not primaryAlert.shown, "disabling addon failed to hide alert under inaccessible parent context")
+ActionButton1.contextAccessible = true
+assert(SDG:SetOption("enabled", true), "could not re-enable addon after parent access test")
+callback = assert(actionCallbacks["ActionButton.OnActionChanged"]).callback
+
+-- If the alert itself is inaccessible, show, hide, and geometry paths must skip
+-- every native call, including calls whose errors Core would otherwise pcall.
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(primaryAlert.shown, "precondition: primary alert did not show for inaccessible child test")
+local inaccessibleMutationBaseline = inaccessibleAlertMutations
+local savedGlowScale = SDG:GetOption("glowScale")
+primaryAlert.accessible = false
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(primaryAlert.shown, "inaccessible visible alert was unexpectedly hidden")
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+primaryAlert.accessible = true
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(not primaryAlert.shown, "precondition: restored alert did not hide before inaccessible show test")
+primaryAlert.accessible = false
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+SDG:SetOption("glowScale", math.min(1.8, savedGlowScale + 0.1))
+assert(inaccessibleAlertMutations == inaccessibleMutationBaseline,
+    "Core attempted native operations on an inaccessible addon alert")
+assert(not primaryAlert.shown, "inaccessible alert was mutated while proc state changed")
+primaryAlert.accessible = true
+SDG:SetOption("glowScale", savedGlowScale)
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(primaryAlert.shown, "restored alert did not show on the next readable ON transition")
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(not primaryAlert.shown, "restored alert could not hide on the next readable OFF transition")
 
 -- Current-slot validation prevents a stale glow after a page/action change.
 overlayState[47541] = true
@@ -485,6 +624,24 @@ C_SpellActivationOverlay.IsSpellOverlayed = nil
 local function FireCurrent(event, ...)
     activeEventFrame.scripts.OnEvent(activeEventFrame, event, ...)
 end
+
+-- A deep rescan requested just before combat is retained through its deferred
+-- combat pass and runs exactly once after regeneration.
+local deepStartsBeforeCombat = deepEnumerationStarts
+SDG:RequestRescan("deep-before-combat", true)
+inCombat = true
+Advance(0.10)
+assert(deepEnumerationStarts == deepStartsBeforeCombat,
+    "deep frame enumeration ran during combat")
+SDG:RequestRescan("ordinary-during-combat", false)
+inCombat = false
+FireCurrent("PLAYER_REGEN_ENABLED")
+Advance(0.10)
+assert(deepEnumerationStarts == deepStartsBeforeCombat + 1,
+    "deferred deep rescan did not execute exactly once out of combat")
+assert(R.frameState[deepOnlyButton] and R.frameState[deepOnlyButton].alert,
+    "deferred deep rescan did not map its otherwise unknown button")
+
 FireCurrent("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
 assert(R.glowActive, "precondition: unavailable query did not use bounded event fallback")
 assert(next(R.timers) ~= nil, "precondition: SHOW did not schedule owned timers")
