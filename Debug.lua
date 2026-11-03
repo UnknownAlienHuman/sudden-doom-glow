@@ -1,4 +1,4 @@
--- Sudden Doom Glow: optional visual debug log.
+-- Sudden Doom Glow: optional visual diagnostics, separate from runtime state.
 
 local SDG = _G.SuddenDoomGlow
 if type(SDG) ~= "table" then return end
@@ -9,9 +9,16 @@ local frame
 local scrollFrame
 local content
 local text
+local refreshTimer
+local pendingShow = false
+local deferFrame
 
 SDG.DebugUI = SDG.DebugUI or {}
 local UI = SDG.DebugUI
+
+local function InCombat()
+    return type(_G.InCombatLockdown) == "function" and _G.InCombatLockdown()
+end
 
 local function SafePrint(message)
     if type(SDG.Print) == "function" then
@@ -21,36 +28,85 @@ local function SafePrint(message)
     end
 end
 
+local function IsVisible()
+    return frame and frame:IsShown()
+end
+
+local function CancelRefresh()
+    if refreshTimer and type(refreshTimer.Cancel) == "function" then
+        refreshTimer:Cancel()
+    end
+    refreshTimer = nil
+end
+
 local function RefreshText()
-    if not text then return end
+    refreshTimer = nil
+    if not text or not IsVisible() then return end
     text:SetText(table.concat(lines, "\n"))
-    local height = math.max(1, text:GetStringHeight() + 20)
+    local height = math.max(1, text:GetStringHeight() + 18)
     content:SetHeight(height)
-    if scrollFrame then
-        local maxOffset = math.max(0, height - scrollFrame:GetHeight())
-        scrollFrame:SetVerticalScroll(maxOffset)
+    local maxOffset = math.max(0, height - scrollFrame:GetHeight())
+    scrollFrame:SetVerticalScroll(maxOffset)
+end
+
+local function ScheduleRefresh()
+    if not IsVisible() or refreshTimer then return end
+    local timers = _G.C_Timer
+    if timers and type(timers.NewTimer) == "function" then
+        refreshTimer = timers.NewTimer(0.05, RefreshText)
+    else
+        RefreshText()
     end
 end
 
+local function EnsureDeferredWorkFrame()
+    if deferFrame then return deferFrame end
+    if type(_G.CreateFrame) ~= "function" then return nil end
+
+    deferFrame = _G.CreateFrame("Frame")
+    deferFrame:SetScript("OnEvent", function(self)
+        if InCombat() then return end
+        self:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        if pendingShow then
+            pendingShow = false
+            UI:Show()
+        end
+    end)
+    return deferFrame
+end
+
+local function DeferShow()
+    pendingShow = true
+    local owner = EnsureDeferredWorkFrame()
+    if owner and not owner:IsEventRegistered("PLAYER_REGEN_ENABLED") then
+        owner:RegisterEvent("PLAYER_REGEN_ENABLED")
+    end
+    SafePrint("Debug window will open after combat.")
+end
+
 function SDG:LogDebug(message)
-    local db = _G.SuddenDoomGlowDB
-    if not db or not db.debug then return end
+    if type(SDG.GetOption) ~= "function" or not SDG:GetOption("debug") then return end
 
     local timestamp = _G.GetTime and _G.GetTime() or 0
     lines[#lines + 1] = ("|cff888888[%.3f]|r %s"):format(timestamp, tostring(message))
     if #lines > MAX_LINES then table.remove(lines, 1) end
-    RefreshText()
+    ScheduleRefresh()
 end
 
 function UI:Clear()
     for i = #lines, 1, -1 do lines[i] = nil end
-    RefreshText()
+    ScheduleRefresh()
 end
 
 function UI:Create()
     if frame then return frame end
+    if InCombat() then
+        DeferShow()
+        return nil
+    end
+    if type(_G.CreateFrame) ~= "function" then return nil end
 
-    frame = CreateFrame("Frame", "SDG_DebugFrame", UIParent, "BackdropTemplate")
+    frame = _G.CreateFrame("Frame", "SDG_DebugFrame", _G.UIParent, "BackdropTemplate")
     frame:SetSize(520, 370)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
@@ -59,28 +115,50 @@ function UI:Create()
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    _G.UISpecialFrames = _G.UISpecialFrames or {}
+    local escapeRegistered = false
+    for i = 1, #_G.UISpecialFrames do
+        if _G.UISpecialFrames[i] == "SDG_DebugFrame" then
+            escapeRegistered = true
+            break
+        end
+    end
+    if not escapeRegistered then
+        _G.UISpecialFrames[#_G.UISpecialFrames + 1] = "SDG_DebugFrame"
+    end
+    frame:SetScript("OnShow", ScheduleRefresh)
+    frame:SetScript("OnHide", CancelRefresh)
     frame:SetClampedToScreen(true)
     frame:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true,
-        tileSize = 32,
-        edgeSize = 32,
-        insets = { left = 11, right = 12, top = 12, bottom = 11 },
+        bgFile = "Interface\\Buttons\\WHITE8X8",
+        edgeFile = "Interface\\Buttons\\WHITE8X8",
+        tile = false,
+        edgeSize = 1,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
     })
+    frame:SetBackdropColor(0.035, 0.045, 0.04, 0.97)
+    frame:SetBackdropBorderColor(0.15, 0.24, 0.18, 1)
+
+    local accent = frame:CreateTexture(nil, "ARTWORK")
+    accent:SetColorTexture(0.2, 0.72, 0.38, 1)
+    accent:SetPoint("TOPLEFT", 12, -44)
+    accent:SetPoint("TOPRIGHT", -12, -44)
+    accent:SetHeight(2)
 
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", 0, -16)
-    title:SetText("Sudden Doom Glow — Debug")
+    title:SetPoint("TOPLEFT", 20, -15)
+    title:SetText("Sudden Doom Glow  /  Debug")
+    title:SetTextColor(0.36, 0.88, 0.52)
 
-    local close = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -6, -6)
+    local close = _G.CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -4, -4)
+    close:SetScript("OnClick", function() UI:Hide() end)
 
-    scrollFrame = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 22, -48)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -42, 58)
+    scrollFrame = _G.CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", 20, -58)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -38, 58)
 
-    content = CreateFrame("Frame", nil, scrollFrame)
+    content = _G.CreateFrame("Frame", nil, scrollFrame)
     content:SetSize(440, 1)
     scrollFrame:SetScrollChild(content)
 
@@ -89,40 +167,54 @@ function UI:Create()
     text:SetWidth(440)
     text:SetJustifyH("LEFT")
     text:SetJustifyV("TOP")
+    text:SetTextColor(0.82, 0.86, 0.83)
 
-    local clear = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-    clear:SetSize(90, 24)
-    clear:SetPoint("BOTTOMLEFT", 22, 22)
+    local clear = _G.CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    clear:SetSize(86, 24)
+    clear:SetPoint("BOTTOMLEFT", 20, 18)
     clear:SetText("Clear")
     clear:SetScript("OnClick", function() UI:Clear() end)
 
-    local rescan = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-    rescan:SetSize(110, 24)
+    local rescan = _G.CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    rescan:SetSize(112, 24)
     rescan:SetPoint("LEFT", clear, "RIGHT", 10, 0)
     rescan:SetText("Deep rescan")
     rescan:SetScript("OnClick", function()
         SafePrint("Deep rescan requested")
-        SDG:RequestRescan("debug-ui", true)
+        if type(SDG.RequestRescan) == "function" then SDG:RequestRescan("debug-ui", true) end
     end)
 
-    local test = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
-    test:SetSize(100, 24)
+    local test = _G.CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    test:SetSize(96, 24)
     test:SetPoint("LEFT", rescan, "RIGHT", 10, 0)
     test:SetText("Test glow")
     test:SetScript("OnClick", function()
-        _G.SlashCmdList["SUDDEN_DOOM_GLOW"]("test")
+        if type(SDG.TestGlow) == "function" then SDG:TestGlow() end
     end)
 
-    RefreshText()
     frame:Hide()
     return frame
 end
 
 function UI:Show()
+    if InCombat() then
+        DeferShow()
+        return false
+    end
     local window = self:Create()
+    if not window then return false end
     window:Show()
+    return true
 end
 
 function UI:Hide()
+    pendingShow = false
+    if deferFrame and deferFrame:IsEventRegistered("PLAYER_REGEN_ENABLED") then
+        deferFrame:UnregisterEvent("PLAYER_REGEN_ENABLED")
+    end
     if frame then frame:Hide() end
 end
+
+-- This nonvisual event owner may be created during a late combat-time load;
+-- the debug window itself is still created only after lockdown ends.
+EnsureDeferredWorkFrame()

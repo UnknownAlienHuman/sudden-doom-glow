@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.0 — 2026-11-02
+
+### Retail 12.1.5
+
+- Target interface `120105`; source reviewed at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`.
+- Replace the guessed 540-slot sweep with `C_ActionBar.FindSpellActionButtons` and current-slot `C_ActionBar.GetSpell` lookups.
+- Fix stale paging matches and remove macro-body substring matching.
+- Check secret/access boundaries before comparisons, conversion and indexing.
+- Hook actual Cooldown Viewer instances, including items created before addon load; use configured base spell identity only.
+- Keep pool enumeration out of proc events and retain membership when a pool is unreadable.
+- Cancel owned timers and native callbacks on disable; invalidate transient signals on specialization, world and secrecy changes.
+- Preserve explicit spell-list removals across rebuilds/reloads; validate settings and leave future schemas untouched.
+
+### Controls and maintenance
+
+- Add native Settings controls for enablement, Cooldown Viewer mirroring, diagnostics and glow size; `/sdglow` opens the category.
+- Refresh diagnostics with a dark green panel, bounded log and visible-only text updates.
+- Prepare pageable button alerts outside combat; static multibars allocate alerts only for matching spells.
+- Add regression cases for copied mixins, secret/unreadable values, combat restrictions, macro false matches, Settings proxies and lifecycle cleanup.
+- Consolidate the code map in `ARCHITECTURE.md`; add pinned API references and a deterministic install packager.
+
+### Validation
+
+Lua 5.1.5 syntax, static checks, the stubbed smoke harness and package checks pass. Live-client combat, taint, event payloads, rendering and performance remain **NOT-RUN**; see [VALIDATION.md](VALIDATION.md).
+
 ## 1.3.1 — 2026-08-29
 
 ### Retail 12.1 migration
