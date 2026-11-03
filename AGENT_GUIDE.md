@@ -1,67 +1,45 @@
 # Sudden Doom Glow agent guide
 
-## Target
+## Target and evidence
 
-- Retail 12.1.0
-- Interface `120100`
-- Release `1.3.1`
-- Runtime files: `Core.lua`, then `Debug.lua`
+- Release: `1.4.0`
+- Target: Retail `12.1.5`; TOC interface `120105` is expected target metadata.
+- Selected Blizzard UI source: build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5`, checked `2026-11-03`; current `live` head matches this pin.
+- Live client build, combat, taint, and rendering validation: **NOT-RUN**.
 
-## Read order
+Read [SuddenDoomGlow.toc](SuddenDoomGlow.toc), [ARCHITECTURE.md](ARCHITECTURE.md), [API contracts](docs/API_CONTRACTS.md), then the relevant sections of `Core.lua`, `Options.lua`, and `Debug.lua`. Read the smoke harness and static checks before changing their contracts.
 
-1. `SuddenDoomGlow.toc`
-2. `ARCHITECTURE.md`
-3. `Core.lua`: DB/access helpers -> spell family -> action mapping -> rendering -> CDM -> signals -> events/commands
-4. `tests/static_checks.py`
-5. `tests/runtime_smoke.lua`
+## Invariants
 
-## Non-negotiable invariants
-
-- Spell Activation Overlay is the proc-state contract. Do not restore general `UNIT_AURA`, CLEU, resource-cost, usability, cooldown, or timing inference.
-- Any readable overlay query `true` may enable the glow. OFF is authoritative only when every configured query candidate is readable and false.
-- Keep both the synchronous SHOW grace and the longer unavailable-query TTL. They solve different failure modes.
-- One HIDE removes only its own event signal.
-- Unknown overlay events are wake-ups only; never treat every overlay as Sudden Doom.
-- Accept a new target spell only after a base/override relationship to a configured root is proven.
-- Never create, reparent, resize, reanchor, or otherwise structurally mutate alert/action frames in combat.
-- Validate the current action slot before showing a button glow.
-- Keep Blizzard and addon glow ownership separate. Do not call or patch `ActionButtonSpellAlertManager`.
-- Keep external-frame metadata in weak-key addon tables.
-- Cooldown Viewer integration is lifecycle-hooked and event-driven. Do not add a ticker or infer aura state from managed widgets.
-- If any active CDM pool cannot be read, retain the previous tracked set rather than pruning from partial evidence.
-- SavedVariables migration must preserve settings; never wipe the DB on an addon version change.
+- Use overlay events and `C_SpellActivationOverlay.IsSpellOverlayed` for proc state. Do not restore aura, combat-log, resource-cost, cooldown, usability, or timing inference.
+- A readable true can enable the glow. OFF is authoritative only when every configured candidate is readable and false. Keep the synchronous SHOW grace and bounded unavailable-query fallback.
+- Keep HIDE signals independent. Unknown overlay events only wake reconciliation.
+- Accept targets only when configured roots/base/override relationships prove them.
+- Discover buttons from observed named/current-assignment surfaces. `C_ActionBar.GetSpell` is the primary slot-to-spell lookup; `GetActionInfo` with `GetMacroSpell` is the resolved current-assignment fallback. Do not invent slot scans.
+- Keep one weak `trackedButtons` membership set and the weak `knownButtons` discovery set. Validate the current readable assignment before showing a glow.
+- For action changes, update the event's relevant slot immediately, then coalesce one unfiltered next-frame pass over known buttons. Do not replace the pending pass on every event.
+- Keep alert ownership and metadata in addon-owned structures. Do not call or patch `ActionButtonSpellAlertManager`.
+- Defer alert construction and structural changes out of combat.
+- The Cooldown Viewer adapter is source-coupled. Use configured `GetBaseSpellID` for identity; do not use managed aura-selected `GetSpellID`. Hook actual item instances and avoid pool scans from proc events.
+- If pool evidence is incomplete, retain tracked membership and hide unverified assignments rather than pruning from partial evidence.
+- SavedVariables migrations preserve unrelated user data.
 
 ## Change routing
 
-- Defaults/schema: top of `Core.lua`, `InitializeDB`.
-- Replacement handling: `RebuildSpellFamilies`, `LearnExplicitOverride`.
-- Bar support: `NAMED_BUTTON_SETS`, `MapNamedButtons`; keep deep enumeration manual.
-- CDM compatibility: `GetCDMFrameSpellIDs`, `AttachCDMHooks`; verify against the pinned current Blizzard source before changing hook names.
-- Signal timing: constants and `ReconcileGlow`; update the runtime harness for every arbitration change.
-- User controls: slash-command block and `Debug.lua`.
+- Defaults, schema, options, spell family, action mapping, signals, and rendering: `Core.lua`.
+- Settings registration and combat deferral: `Options.lua`.
+- Diagnostic log/window: `Debug.lua`.
+- Contract pins and evidence limits: `docs/API_CONTRACTS.md`.
+- Live-client evidence: `VALIDATION.md` and `docs/LIVE_TEST_CHECKLIST.md`.
+- Packaging: `scripts/package.py`; keep the TOC runtime entries equal to its runtime allowlist.
 
-## Required checks
+## Checks and release archive
 
 ```bash
 python tests/static_checks.py .
+luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua
 lua tests/runtime_smoke.lua Core.lua
-luac -p Core.lua
-luac -p Debug.lua
+python scripts/package.py
 ```
 
-Then run the live matrix in `TODO.md`. Source/static checks cannot prove combat restrictions or current hotfixed payload IDs.
-
-## Release package
-
-The install ZIP must contain one top-level `SuddenDoomGlow/` directory with only:
-
-```text
-Core.lua
-Debug.lua
-SuddenDoomGlow.toc
-README.md
-CHANGELOG.md
-LICENSE
-```
-
-Do not include agent guides, TODOs, architecture files, tests, logs, or other repository-only material.
+The install archive must contain one top-level `SuddenDoomGlow/` directory with exactly the packager's runtime and user-facing release allowlist. The archive excludes repository guidance, tests, and validation records. Stub checks do not prove live-client behavior. See [VALIDATION.md](VALIDATION.md).

@@ -1,47 +1,65 @@
 # Architecture
 
+Release `1.4.0` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-03 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; current `live` head matches this pin. Live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
+
 ## Runtime flow
 
-```text
-PLAYER_LOGIN
-  -> DK gate
-  -> schema migration
-  -> spell-family expansion
-  -> action-slot/button mapping
-  -> Cooldown Viewer lifecycle hooks
-
-SHOW/HIDE event or official query wake-up
-  -> signal arbitration
-  -> desired boolean glow state
-  -> idempotent addon-owned rendering
+```mermaid
+flowchart TD
+    Login[PLAYER_LOGIN] --> Family[Build configured spell families]
+    Family --> Mapping[Observe known buttons and current assignments]
+    Login --> Viewer[Attach Cooldown Viewer instance hooks]
+    Overlay[Overlay SHOW or HIDE] --> Arbitration[Query and event arbitration]
+    Query[IsSpellOverlayed] --> Arbitration
+    Override[Cooldown Viewer spell override] --> Family
+    Arbitration --> State[Desired glow state]
+    Mapping --> Render[Addon-owned alert]
+    Viewer --> Render
+    State --> Render
+    Combat[Combat lockdown] --> Deferred[Defer structural changes]
+    Deferred --> Mapping
 ```
 
-## Detection boundary
+## Detection
 
-The addon does not consume general aura state. The only proc-state surface is Blizzard's Spell Activation Overlay contract:
+The detection authority is the Spell Activation Overlay event/query pair. `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW` and `...GLOW_HIDE` wake reconciliation; `C_SpellActivationOverlay.IsSpellOverlayed` supplies current state when its caller and inputs are allowed. The addon keeps each event spell independent, treats incomplete query evidence as unknown, and uses a bounded fallback when the query is unavailable.
 
-- `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW`
-- `SPELL_ACTIVATION_OVERLAY_GLOW_HIDE`
-- `C_SpellActivationOverlay.IsSpellOverlayed`
+`targetRoots` comes from defaults and SavedVariables. `targetFamily` expands configured roots with base and override relationships and explicit Cooldown Viewer override events. `signalFamily` includes configured overlay aliases used for detection. A signal alias does not by itself become an action-button target.
 
-A query `true` is sufficient for ON. A query `false` is sufficient for OFF only when all configured candidates were readable. Relevant event state bridges synchronous ordering and temporary query unavailability, with a short grace and a hard TTL.
+## Action buttons
 
-## Spell identity
+The addon discovers buttons through known named surfaces and observed current assignments. It reads the spell in a button's current slot with `C_ActionBar.GetSpell`; an ordinary result without a spell ID can fall back to `GetActionInfo` and `GetMacroSpell`. Failed or inaccessible queries remain unknown. A button is rendered only after its current readable assignment belongs to the configured target family. One weak `trackedButtons` set owns current matches and one weak `knownButtons` set owns observed surfaces. A relevant slot event updates that slot immediately; a single coalesced next-frame pass then rechecks all known buttons to cover provider update ordering. Deep frame enumeration is manual.
 
-`targetRoots` comes from SavedVariables/defaults. `targetFamily` is runtime-only and contains roots, base spells, current overrides, and explicit Cooldown Viewer override events. A spell discovered on an action/CDM frame is accepted only when `GetBaseSpell` or a current root override proves the relationship.
+Pageable bars prepare alerts outside combat; static Blizzard multibars allocate them only for matching spells.
 
-`signalFamily` is the target family plus configured overlay aliases. Signal aliases affect detection only; they are never treated as action-button targets.
+## Cooldown Viewer
 
-## Surfaces
+When enabled, the addon observes the actual four configured viewer instances, reconciles their active item pools at setup/recovery boundaries, and hooks each observed item instance's assignment/reset methods. Item identity is evaluated through `GetBaseSpellID`; `GetSpellID` can select managed aura identity and is not used for this match. Overlay events update the already tracked item set; they do not trigger pool enumeration.
 
-Action buttons are mapped slot-first. Physical frames are only render targets after the current slot is revalidated. Structural discovery and alert creation are deferred in combat.
+These viewer member names and frame pools are source-coupled implementation details. See [API contracts](docs/API_CONTRACTS.md) for exact pins and the extension boundary.
 
-Cooldown Viewer frames are observed through current 12.1 lifecycle methods. Their aura internals are not read, hooked, or inferred. Pool enumeration is used only for initial/recovery reconciliation, not as a ticker.
+## Rendering and ownership
 
-## Ownership
+Weak-key tables hold addon metadata; external frames do not receive addon fields. The addon creates an alert child using Blizzard's `ActionButtonSpellAlertTemplate`, then controls its animation and visibility. This template and its named animation children are private UI implementation details, not a public extension contract.
 
-All runtime metadata is stored in weak-key addon tables. External frames are not modified with `__SDG` fields. The addon creates its own `ActionButtonSpellAlertTemplate` child and never enters Blizzard's global alert-manager state.
+Alert creation, parenting, sizing, and anchoring happen outside combat. In combat, existing addon-owned presentation is shown or hidden only. A stale or unreadable assignment cannot authorize a new button glow.
 
-## Persistent contract
+## Persistent data
 
-`SuddenDoomGlowDB` stores user configuration and `schemaVersion`. Runtime frame maps, events, timers, explicit current-session overrides, and resolved spell families are never persisted.
+`SuddenDoomGlowDB` stores user settings and `schemaVersion`. Frame maps, event signals, timers, explicit current-session overrides, and resolved spell families remain runtime-only.
+
+## Code map
+
+| Area | Main code |
+|---|---|
+| SavedVariables migration and options | `InitializeDB`, `GetOption`, `SetOption` in `Core.lua` |
+| Secret/access boundary | `IsAccessible`, `SafeNumber`, `FrameCanBeUsed` in `Core.lua` |
+| Spell family and override handling | `RebuildSpellFamilies`, `IsTargetFamilySpell`, `LearnExplicitOverride` in `Core.lua` |
+| Action assignment and button mapping | `GetActionSpellID`, `GetButtonSlot`, `MapNamedButtons`, `RefreshKnownButtons` in `Core.lua` |
+| Glow ownership | `GetFrameState`, `EnsureAlert`, `ShowFrameGlow`, `HideFrameGlow` in `Core.lua` |
+| Cooldown Viewer | `CDMFrameMatches`, `ReconcileCDMFrames`, `HookCDMItem` in `Core.lua` |
+| Signal arbitration | `QueryOverlayState`, `SetEventSignal`, `ReconcileGlow` in `Core.lua` |
+| Settings UI | `Options.lua` |
+| Diagnostics window and logging | `Debug.lua` |
+
+The static checker and smoke harness are described in [tests/README.md](tests/README.md). The historical [1.3.1 release note](docs/RELEASE_1.3.1.md) remains historical.

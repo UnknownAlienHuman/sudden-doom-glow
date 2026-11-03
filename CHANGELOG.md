@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.4.0 — 2026-11-03
+
+### Retail 12.1.5
+
+- Target interface `120105`; source reviewed at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`.
+- Replace the guessed 540-slot sweep with `C_ActionBar.GetSpell` lookups of observed button assignments; remove the unused candidate-slot cache.
+- Fix stale paging matches and remove macro-body substring matching.
+- Use one weak button set so temporary inaccessibility cannot desynchronize tracking; coalesce bursts into one complete deferred assignment check.
+- Check secret/access boundaries before comparisons, conversion and indexing.
+- Recheck addon-owned alert and animation access before mutation; hide accessible addon visuals even when their parent cannot be inspected.
+- Hook actual Cooldown Viewer instances, including items created before addon load; use configured base spell identity only.
+- Keep pool enumeration out of proc events and retain membership when a pool is unreadable.
+- Cancel owned timers and native callbacks on disable; invalidate transient signals on specialization, world and secrecy changes.
+- Preserve explicit spell-list removals across rebuilds/reloads; validate settings and leave future schemas untouched.
+
+### Controls and maintenance
+
+- Add native Settings controls for enablement, Cooldown Viewer mirroring, diagnostics and glow size; `/sdglow` opens the category.
+- Refresh diagnostics with a dark green panel, bounded log and visible-only text updates.
+- Prepare pageable button alerts outside combat; static multibars allocate alerts only for matching spells.
+- Consolidate button updates and pending deep scans; remove repeated login family builds and redundant glow passes.
+- Add regression cases for copied mixins, secret/unreadable values, combat restrictions, macro false matches, Settings proxies and lifecycle cleanup.
+- Consolidate the code map in `ARCHITECTURE.md`; add pinned API references and a deterministic install packager.
+
+### Validation
+
+Lua 5.1 syntax, static checks, the stubbed smoke harness and package checks pass. The second pass reproduces the inaccessible-button and multi-slot burst bugs against the earlier implementation and verifies their fixes. Live-client combat, taint, event payloads, rendering and performance remain **NOT-RUN**; see [VALIDATION.md](VALIDATION.md).
+
 ## 1.3.1 — 2026-08-29
 
 ### Retail 12.1 migration

@@ -1,15 +1,30 @@
-# Retail 12.1 validation record
+# Validation record
 
-Use this file only for evidence captured from a current game client. Source inspection and the stubbed runtime harness are recorded separately in `CHANGELOG.md` and `tests/`.
+This file tracks evidence that must come from a named Retail client. Source inspection and the stubbed harness are separate forms of evidence; neither establishes live behavior.
 
-## Current state
+## Current status
 
-- Implementation: `1.3.1`
-- Target interface: `120100`
-- Source/static/runtime-harness verification: complete
-- Live combat verification: pending
+- Addon release: `1.4.0`
+- TOC target interface: `120105` (expected for Retail 12.1.5)
+- Selected UI source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
+- Source pin check: `2026-11-03`
+- Static checks: **PASS** (interface/version metadata and loaded runtime policy checks)
+- Stubbed runtime smoke: **PASS** on Lua 5.1.1 (settings persistence, overlay arbitration, action mapping, and Cooldown Viewer lifecycle scenarios)
+- Lua syntax check: **PASS** via Lua 5.1.1 `loadfile` for runtime files and the smoke harness
+- Client build/interface: **NOT-RUN**
+- Live combat, restrictions, event payloads, taint, rendering, and Cooldown Viewer lifecycle: **NOT-RUN**
 
-## Record format
+## Second source and host review — 2026-11-03
+
+The selected `live` source head still matches the pin above. The first pass was checked with Lua 5.1.5; this pass uses the available Lua 5.1.1 interpreter.
+
+Two behavioral regressions were reproduced independently against PR head `4439c39010d56c083adf7a285b58ee3e285086be`: a temporarily inaccessible button could not resume glow rendering, and a burst of slot changes lost the earlier slot's delayed assignment update. Both pass after replacing duplicate membership state and retaining one complete deferred refresh. The harness also checks alert-access boundaries and deep-scan deferral across combat.
+
+These checks validate ordinary Lua control flow and stubbed API interactions. They do not establish client access policy, taint safety, visual quality, or a measured performance gain.
+
+## Evidence record format
+
+Append one record per client build and context. Preserve failures and superseded evidence.
 
 ```text
 build=
@@ -23,11 +38,10 @@ Sudden Doom stacks=
 overlay payload spellID=
 resolved targets=
 resolved signals=
-detection=
 tracked buttons=
-tracked CDM frames=
+tracked Cooldown Viewer items=
 result=pass|fail
 error/reproduction=
 ```
 
-Do not overwrite failed evidence after a hotfix; append a new build/context record and mark the superseded result explicitly.
+See [docs/LIVE_TEST_CHECKLIST.md](docs/LIVE_TEST_CHECKLIST.md) for the scenarios to record. Do not overwrite a failed result after a hotfix; append a record with the new build/context.
