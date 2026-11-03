@@ -4,17 +4,23 @@ This file tracks evidence that must come from a named Retail client. Source insp
 
 ## Current status
 
-- Addon release: `1.4.0`
+- Addon release: `1.4.1`
 - TOC target interface: `120105` (expected for Retail 12.1.5)
 - Selected UI source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
 - Source pin check: `2026-11-03`
-- Static checks: **PASS** (interface/version metadata and loaded runtime policy checks)
-- Stubbed runtime smoke: **PASS** on Lua 5.1.1 (settings persistence, overlay arbitration, action mapping, and Cooldown Viewer lifecycle scenarios)
-- Lua syntax check: **PASS** via Lua 5.1.1 `loadfile` for runtime files and the smoke harness
+- Static checks: **PASS**
+- Stubbed runtime smoke: **PASS** on Lua 5.1.1
+- Lua syntax check: **PASS** via Lua 5.1.1 `loadfile`
 - Client build/interface: **NOT-RUN**
 - Live combat, restrictions, event payloads, taint, rendering, and Cooldown Viewer lifecycle: **NOT-RUN**
 
-## Second source and host review — 2026-11-03
+## 1.4.1 source and host review — 2026-11-03
+
+Static checks, Lua 5.1.1 syntax, and the stubbed runtime smoke pass. Coverage includes overlay arbitration, action and Cooldown Viewer assignment refresh after configuration changes, disabled pending-hide recovery, and future-schema slash refusal. Unreadable overlay payloads wake the authoritative query; missed ON transitions recover on authoritative context events. This is host/source evidence only: no WoW client, combat, taint, rendering, or performance result is claimed.
+
+Temporary variants that independently restore the old candidate-cache, disabled-cleanup, and unreadable-HIDE paths each fail the corresponding regression assertion. The unchanged final implementation passes all three.
+
+## Prior 1.4.0 source and host review — 2026-11-03
 
 The selected `live` source head still matches the pin above. The first pass was checked with Lua 5.1.5; this pass uses the available Lua 5.1.1 interpreter.
 
@@ -44,4 +50,4 @@ result=pass|fail
 error/reproduction=
 ```
 
-See [docs/LIVE_TEST_CHECKLIST.md](docs/LIVE_TEST_CHECKLIST.md) for the scenarios to record. Do not overwrite a failed result after a hotfix; append a record with the new build/context.
+See [docs/LIVE_TEST_CHECKLIST.md](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/LIVE_TEST_CHECKLIST.md) for the scenarios to record. Do not overwrite a failed result after a hotfix; append a record with the new build/context.

@@ -1,8 +1,8 @@
 # TODO
 
-Release `1.4.0` targets Retail 12.1.5, expected interface `120105`. The selected source pin is build `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`, checked 2026-11-03. Client validation is **NOT-RUN**.
+Release `1.4.1` targets Retail 12.1.5, expected interface `120105`. The selected source pin is build `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`, checked 2026-11-03. Client validation is **NOT-RUN**.
 
-## Before calling 1.4.0 live-validated
+## Before calling the current patch live-validated
 
 - [ ] Capture the Retail client build and interface from `/sdglow status` and record the test date.
 - [ ] Verify one- and two-stack Sudden Doom behavior, consumption, and natural expiry.

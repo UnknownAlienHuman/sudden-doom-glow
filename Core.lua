@@ -66,6 +66,7 @@ local R = {
     trackedButtons = NewWeakKeyTable(),
     knownButtons = NewWeakKeyTable(),
     frameState = NewWeakKeyTable(),
+    pendingHides = NewWeakKeyTable(),
 
     cdmFrames = NewWeakKeyTable(),
     cdmViewerHooks = NewWeakKeyTable(),
@@ -93,6 +94,12 @@ local R = {
 SDG.runtime = R
 
 local DB
+local frame = CreateFrame("Frame")
+local RECOVERY_EVENTS = {
+    PLAYER_REGEN_ENABLED = true,
+    PLAYER_ENTERING_WORLD = true,
+    SPELL_SECRECY_CHANGED = true,
+}
 
 local function InCombat()
     return InCombatLockdown and InCombatLockdown() or false
@@ -186,6 +193,14 @@ local function RuntimeEnabled()
     return DB and DB.enabled and R.class == "DEATHKNIGHT" and not R.unsupportedSchema
 end
 
+local function UpdateRecoveryEvents()
+    if R.runtimeRegistered then return end
+    for event in pairs(RECOVERY_EVENTS) do
+        if next(R.pendingHides) then frame:RegisterEvent(event)
+        else frame:UnregisterEvent(event) end
+    end
+end
+
 local function CancelTimer(key)
     local timer = R.timers[key]
     R.timers[key] = nil
@@ -194,6 +209,11 @@ end
 
 local function CancelTimers()
     for key in pairs(R.timers) do CancelTimer(key) end
+end
+
+local function ClearQueryObservation()
+    R.lastQueryActiveAt, R.lastQuerySpellID = nil, nil
+    CancelTimer("query-expire")
 end
 
 local function ScheduleTimer(key, delay, callback)
@@ -379,6 +399,9 @@ local function RebuildSpellFamilies()
     end
     for i = 1, #DB.signalSpellIDs do
         AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i])
+    end
+    if R.lastQuerySpellID and not R.signalFamily[R.lastQuerySpellID] then
+        ClearQueryObservation()
     end
 end
 
@@ -612,7 +635,44 @@ local function PlayAnimation(animation)
     return false
 end
 
-local HideFrameGlow
+local function DeferHide(state)
+    R.pendingHides[state] = true
+    UpdateRecoveryEvents()
+end
+
+local function HideAlert(state)
+    if not state.alert or not state.shown then
+        R.pendingHides[state] = nil
+        return
+    end
+    local alert = state.alert
+    if not FrameCanBeUsed(alert) then DeferHide(state); return end
+
+    alert.animationPlaying = false
+    StopAnimation(alert.ProcStartAnim)
+    StopAnimation(alert.ProcLoop)
+    if pcall(alert.Hide, alert) then
+        state.shown = false
+        R.pendingHides[state] = nil
+    else
+        DeferHide(state)
+    end
+end
+
+local function HideFrameGlow(frame)
+    -- Only the ordinary identity is needed to find our own presentation. An
+    -- inaccessible parent must not prevent hiding an accessible addon child.
+    if not IsAccessible(frame) or not frame then return end
+    local state = R.frameState[frame]
+    if state then HideAlert(state) end
+end
+
+local function FlushPendingHides()
+    -- Recheck only at an authoritative context transition. No polling, borrowed
+    -- callback payload or cached permission is retained by this cleanup owner.
+    for state in pairs(R.pendingHides) do HideAlert(state) end
+    UpdateRecoveryEvents()
+end
 
 local function ShowFrameGlow(frame)
     if not FrameCanBeUsed(frame) then HideFrameGlow(frame); return end
@@ -626,7 +686,7 @@ local function ShowFrameGlow(frame)
     end
 
     if state.isCDM and not state.assignmentReadable then return end
-    if state.shown then return end
+    if state.shown and not R.pendingHides[state] then return end
     local alert = EnsureAlert(frame)
     if not alert then return end
 
@@ -637,24 +697,7 @@ local function ShowFrameGlow(frame)
         PlayAnimation(alert.ProcLoop)
     end
     state.shown = true
-end
-
-HideFrameGlow = function(frame)
-    -- Only the ordinary identity is needed to find our own presentation. An
-    -- inaccessible parent must not prevent hiding an accessible addon child.
-    if not IsAccessible(frame) or not frame then return end
-    local state = R.frameState[frame]
-    if not state or not FrameCanBeUsed(state.alert) then return end
-    if not state.shown then
-        pcall(state.alert.Hide, state.alert)
-        return
-    end
-
-    state.alert.animationPlaying = false
-    StopAnimation(state.alert.ProcStartAnim)
-    StopAnimation(state.alert.ProcLoop)
-    pcall(state.alert.Hide, state.alert)
-    state.shown = false
+    R.pendingHides[state] = nil
 end
 
 local function RefreshButton(button, slot)
@@ -876,7 +919,7 @@ local function QueryOverlayState()
                 R.overlayQueryReadable = readable
                 R.overlayQueryCandidates = candidates
                 R.overlayQueryAuthoritative = true
-                return true, true
+                return true, true, spellID
             end
         end
     end
@@ -922,11 +965,11 @@ ReconcileGlow = function(reason)
         SetGlow(true)
         return
     end
-    local queryActive, queryAuthoritative = QueryOverlayState()
+    local queryActive, queryAuthoritative, querySpellID = QueryOverlayState()
     local eventActive, newest = HasEventSignal()
     local withinShowGrace = eventActive and now - newest <= OVERLAY_SHOW_GRACE
     if queryActive then
-        R.lastQueryActiveAt = now
+        R.lastQueryActiveAt, R.lastQuerySpellID = now, querySpellID
         CancelTimer("query-expire")
         R.lastDetection = "overlay-query"
         SetGlow(true)
@@ -940,14 +983,13 @@ ReconcileGlow = function(reason)
         SetGlow(true)
         if not R.timers["query-expire"] then
             ScheduleTimer("query-expire", EVENT_FALLBACK_TTL - (now - R.lastQueryActiveAt), function()
-                R.lastQueryActiveAt = nil
+                ClearQueryObservation()
                 ReconcileGlow("query-ttl")
             end)
         end
     else
         if queryAuthoritative then ClearEventSignals() end
-        R.lastQueryActiveAt = nil
-        CancelTimer("query-expire")
+        ClearQueryObservation()
         R.lastDetection = queryAuthoritative and "overlay-query-off" or "no-readable-signal"
         SetGlow(false)
     end
@@ -978,7 +1020,6 @@ end
 
 local function HandleOverlayShow(spellID)
     spellID = SafeID(spellID)
-    if not spellID then return end
 
     if IsRelevantSignal(spellID) then
         SetEventSignal(spellID)
@@ -994,7 +1035,6 @@ end
 
 local function HandleOverlayHide(spellID)
     spellID = SafeID(spellID)
-    if not spellID then return end
 
     if IsRelevantSignal(spellID) then
         ClearEventSignal(spellID)
@@ -1029,6 +1069,17 @@ local function RefreshKnownButtons(changedSlot)
         if not changedSlot or slot == changedSlot then
             RefreshButton(button, slot)
         end
+    end
+end
+
+local function RefreshAssignments()
+    if not RuntimeEnabled() then return end
+    RefreshKnownButtons()
+    if DB.cdm then
+        -- Reuse observed instances; released items have no base spell after
+        -- ResetCooldownData. This also finds newly configured targets without
+        -- enumerating viewer pools or creating missing alerts during combat.
+        for item in pairs(R.cdmItemHooks) do RefreshCDMFrame(item) end
     end
 end
 
@@ -1080,7 +1131,6 @@ local function AttachActionButtonCallback()
     R.actionCallbackAttached = true
 end
 
-local frame = CreateFrame("Frame")
 local RUNTIME_EVENTS = {
     "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED",
     "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", "SPELL_ACTIVATION_OVERLAY_GLOW_HIDE",
@@ -1094,7 +1144,8 @@ local RUNTIME_EVENTS = {
 local function ResetTransientState(clearOverrides)
     CancelTimers()
     ClearMap(R.eventSignals)
-    R.lastQueryActiveAt, R.testUntil = nil, 0
+    ClearQueryObservation()
+    R.testUntil = 0
     R.needsRescan, R.rescanDeep = false, false
     R.rescanReason = nil
     if clearOverrides then ClearMap(R.explicitOverrides) end
@@ -1112,6 +1163,7 @@ local function StopRuntime()
     ResetTransientState(true)
     for item in pairs(R.cdmFrames) do ClearCDMFrame(item) end
     ClearMap(R.trackedButtons)
+    UpdateRecoveryEvents()
     R.lastDetection = "disabled"
 end
 
@@ -1120,6 +1172,7 @@ local function StartRuntime()
     R.runtimeRegistered = true
     for i = 1, #RUNTIME_EVENTS do frame:RegisterEvent(RUNTIME_EVENTS[i]) end
     frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+    FlushPendingHides()
     AttachActionButtonCallback()
     if InCombat() then
         -- Re-enable prepared surfaces without waiting for another proc or page
@@ -1141,7 +1194,11 @@ function SDG:GetOption(key)
 end
 
 function SDG:SetOption(key, value)
-    if not DB or R.unsupportedSchema then return false end
+    if not DB then return false end
+    if R.unsupportedSchema then
+        Print("Update Sudden Doom Glow to edit settings saved by a newer version.")
+        return false
+    end
     if not IsAccessible(value) then return false end
     if key == "glowScale" then
         value = SafeNumber(value)
@@ -1199,6 +1256,7 @@ end
 
 local function OnEvent(_, event, ...)
     if event == "PLAYER_LOGIN" then SDG:OnLogin(); return end
+    if RECOVERY_EVENTS[event] and next(R.pendingHides) then FlushPendingHides() end
     if not RuntimeEnabled() then return end
     if event == "SPELL_ACTIVATION_OVERLAY_GLOW_SHOW" then
         HandleOverlayShow(...)
@@ -1207,7 +1265,7 @@ local function OnEvent(_, event, ...)
     elseif event == "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED" then
         local baseSpellID, overrideSpellID = ...
         if LearnExplicitOverride(baseSpellID, overrideSpellID, event) then
-            RefreshKnownButtons()
+            RefreshAssignments()
             SDG:RequestRescan(event, false)
         end
         ReconcileGlow(event)
@@ -1215,6 +1273,7 @@ local function OnEvent(_, event, ...)
         -- Registration is player-only; the payload is not a proc-state source.
         QueueReconcile("spellcast", OVERLAY_RECONCILE_DELAY)
     elseif event == "PLAYER_REGEN_ENABLED" then
+        RefreshAssignments()
         if R.needsGeometry then PrimeTrackedAlerts() end
         if R.needsRescan then SDG:RequestRescan(event)
         else ReconcileGlow(event) end
@@ -1223,6 +1282,7 @@ local function OnEvent(_, event, ...)
     elseif event == "PLAYER_ENTERING_WORLD" then
         ResetTransientState(true)
         RebuildSpellFamilies()
+        RefreshAssignments()
         SDG:RequestRescan(event, false)
         ReconcileGlow(event)
     elseif event == "ADDON_LOADED" then
@@ -1236,7 +1296,7 @@ local function OnEvent(_, event, ...)
         end
         ResetTransientState(true)
         RebuildSpellFamilies()
-        RefreshKnownButtons()
+        RefreshAssignments()
         SDG:RequestRescan(event, false)
         ReconcileGlow(event)
     else
@@ -1286,22 +1346,21 @@ local function ToggleID(list, value, label)
         return
     end
 
+    local added = true
     for i = 1, #list do
         if list[i] == id then
             table.remove(list, i)
-            RebuildSpellFamilies()
-            SDG:RequestRescan(label .. "-removed", false)
-            ReconcileGlow(label .. "-removed")
-            Print("Removed " .. label .. " spellID " .. tostring(id))
-            return
+            added = false
+            break
         end
     end
-
-    list[#list + 1] = id
+    if added then list[#list + 1] = id end
     RebuildSpellFamilies()
-    SDG:RequestRescan(label .. "-added", false)
-    ReconcileGlow(label .. "-added")
-    Print("Added " .. label .. " spellID " .. tostring(id))
+    RefreshAssignments()
+    local reason = label .. (added and "-added" or "-removed")
+    SDG:RequestRescan(reason, false)
+    ReconcileGlow(reason)
+    Print((added and "Added " or "Removed ") .. label .. " spellID " .. tostring(id))
 end
 
 
@@ -1319,7 +1378,7 @@ _G.SlashCmdList["SUDDEN_DOOM_GLOW"] = function(message)
     elseif command == "status" or command == "dump" then
         DumpStatus()
     elseif command == "debug" then
-        SDG:SetOption("debug", not DB.debug)
+        if not SDG:SetOption("debug", not DB.debug) then return end
         Print("Debug: " .. (DB.debug and "ON" or "OFF"))
     elseif command == "rescan" then
         SDG:RequestRescan("slash", argument:lower() == "deep")
@@ -1336,12 +1395,14 @@ _G.SlashCmdList["SUDDEN_DOOM_GLOW"] = function(message)
         Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
     elseif command == "cdm" then
         argument = argument:lower()
-        if argument == "on" then SDG:SetOption("cdm", true)
-        elseif argument == "off" then SDG:SetOption("cdm", false)
+        if argument == "on" then
+            if not SDG:SetOption("cdm", true) then return end
+        elseif argument == "off" then
+            if not SDG:SetOption("cdm", false) then return end
         else Print("Usage: /sdglow cdm on|off"); return end
         Print("Cooldown Viewer mirror: " .. (DB.cdm and "ON" or "OFF"))
     elseif command == "on" or command == "off" then
-        SDG:SetOption("enabled", command == "on")
+        if not SDG:SetOption("enabled", command == "on") then return end
         Print(DB.enabled and "Enabled" or "Disabled")
     else
         Print("Unknown command. Use /sdglow help")

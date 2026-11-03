@@ -10,6 +10,7 @@ local actionCallbacks = {}
 local messages = {}
 local cdmEnumerations = 0
 local cancelledNewTimers = 0
+local createdNewTimers = 0
 local unpackValues = table.unpack or unpack
 local secretValue = { secret = true }
 local actionGetSpellCalls = 0
@@ -178,6 +179,7 @@ function Settings.OpenToCategory(categoryID) assert(categoryID == 321) end
 
 C_Timer = {}
 function C_Timer.NewTimer(delay, callback)
+    createdNewTimers = createdNewTimers + 1
     local timer = { at = now + delay, callback = callback, cancelled = false }
     function timer:Cancel()
         if not self.cancelled then cancelledNewTimers = cancelledNewTimers + 1 end
@@ -468,6 +470,16 @@ Advance(30.0)
 assert(not R.glowActive, "event fallback TTL did not clear stale glow")
 C_SpellActivationOverlay.IsSpellOverlayed = queryFunction
 
+-- An unreadable event payload still wakes the authoritative query; it does
+-- not need to mutate the per-ID event signal to reconcile OFF.
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+Advance(0.25)
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", secretValue)
+Advance(0.10)
+assert(not R.glowActive, "unreadable HIDE payload suppressed an authoritative OFF query")
+
 -- A temporarily unreadable button must resume rendering when access returns.
 -- A different button callback forces the old compaction path.
 overlayState[47541] = false
@@ -572,6 +584,85 @@ overlayState[47541] = false
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
 assert(not primaryAlert.shown, "restored alert could not hide on the next readable OFF transition")
 
+-- A missed ON is recovered on a lifecycle wake even when global proc state
+-- was already true and no new overlay edge arrives.
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+primaryAlert.accessible = false
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.glowActive and not primaryAlert.shown,
+    "precondition: inaccessible alert did not miss its ON render")
+primaryAlert.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(primaryAlert.shown, "regeneration did not recover a missed ON with global state already active")
+
+-- An inaccessible alert must be hidden after OFF once access returns and a
+-- lifecycle wake occurs. A later ON cancels that pending hide.
+primaryAlert.accessible = false
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(primaryAlert.shown, "inaccessible alert was mutated during OFF")
+primaryAlert.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(not primaryAlert.shown, "pending OFF was not cleaned up after access returned")
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+primaryAlert.accessible = false
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+primaryAlert.accessible = true
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+Fire("PLAYER_REGEN_ENABLED")
+assert(R.glowActive and primaryAlert.shown,
+    "a valid ON did not cancel an earlier queued hide")
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+
+-- Disable must retain enough cleanup ownership to hide an inaccessible alert
+-- after access returns, even though ordinary runtime events have stopped.
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+primaryAlert.accessible = false
+overlayState[47541] = false
+assert(SDG:SetOption("enabled", false), "could not disable with an inaccessible alert")
+local timerCountBeforeDisabledRecovery = createdNewTimers
+assert(activeEventFrame.events.PLAYER_REGEN_ENABLED
+    and activeEventFrame.events.PLAYER_ENTERING_WORLD
+    and activeEventFrame.events.SPELL_SECRECY_CHANGED,
+    "disabled inaccessible alert did not register its recovery wake events")
+assert(not activeEventFrame.events.SPELL_ACTIVATION_OVERLAY_GLOW_SHOW
+    and not activeEventFrame.events.SPELL_ACTIVATION_OVERLAY_GLOW_HIDE,
+    "disabled runtime retained proc events while waiting for cleanup")
+primaryAlert.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(not primaryAlert.shown, "disabled addon abandoned cleanup of its inaccessible alert")
+assert(createdNewTimers == timerCountBeforeDisabledRecovery,
+    "disabled alert cleanup polled with a newly scheduled timer")
+assert(not activeEventFrame.events.PLAYER_REGEN_ENABLED
+    and not activeEventFrame.events.PLAYER_ENTERING_WORLD
+    and not activeEventFrame.events.SPELL_SECRECY_CHANGED,
+    "successful disabled cleanup left recovery events registered")
+assert(SDG:SetOption("enabled", true), "could not re-enable after deferred cleanup")
+callback = assert(actionCallbacks["ActionButton.OnActionChanged"]).callback
+
+-- Disabling CDM while its child is inaccessible also leaves a cleanup that
+-- must run after access returns without a new proc transition.
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+local cdmAlert = assert(R.frameState[cdmItem].alert)
+assert(cdmAlert.shown, "precondition: CDM alert did not show")
+cdmAlert.accessible = false
+assert(SDG:SetOption("cdm", false), "could not disable CDM with an inaccessible alert")
+cdmAlert.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(not cdmAlert.shown, "CDM disable abandoned cleanup of its inaccessible alert")
+assert(SDG:SetOption("cdm", true), "could not re-enable CDM after deferred cleanup")
+callback = assert(actionCallbacks["ActionButton.OnActionChanged"]).callback
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+
 -- Current-slot validation prevents a stale glow after a page/action change.
 overlayState[47541] = true
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
@@ -592,11 +683,56 @@ EssentialCooldownViewer.accessible = true
 SDG:RescanButtons(false)
 assert(R.cdmFrames[cdmItem], "readable viewer unexpectedly lost active CDM item")
 
+-- Removing current target roots in combat hides existing action and CDM
+-- alerts immediately while the unrelated signal continues to hold global ON.
+overlayState[47541] = true
+overlayState[450932] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 450932)
+assert(R.glowActive and R.frameState[ActionButton1].shown and R.frameState[cdmItem].shown,
+    "precondition: action and CDM targets were not glowing under signal ON")
+local cdmEnumerationsBeforeCombatRemoval = cdmEnumerations
+inCombat = true
+SlashCmdList.SUDDEN_DOOM_GLOW("spell 47541")
+SlashCmdList.SUDDEN_DOOM_GLOW("spell 1242174")
+assert(R.glowActive, "removing target roots incorrectly cleared the unrelated active signal")
+assert(not R.frameState[ActionButton1].shown and not R.frameState[cdmItem].shown,
+    "combat target removal left obsolete action or CDM alerts visible")
+assert(cdmEnumerations == cdmEnumerationsBeforeCombatRemoval,
+    "combat target removal enumerated Cooldown Viewer pools")
+inCombat = false
+Fire("PLAYER_REGEN_ENABLED")
+SlashCmdList.SUDDEN_DOOM_GLOW("spell 47541")
+SlashCmdList.SUDDEN_DOOM_GLOW("spell 1242174")
+Advance(0.10)
+overlayState[450932] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 450932)
+overlayState[47541] = false
+
 -- Pool reassignment/reset removes the CDM frame without polling. Invoke the
 -- instance method copied before Core loaded, as Retail does for mixin methods.
 cdmItem:ResetCooldownData()
 assert(not R.cdmFrames[cdmItem], "released CDM frame remained tracked")
 assert(not R.frameState[cdmItem].shown, "released CDM frame retained glow")
+
+-- Removing a configured query candidate invalidates its recent positive
+-- result; retention must not keep an obsolete candidate lit.
+overlayState[47541] = false
+overlayState[207317] = false
+overlayState[1242174] = false
+overlayState[81340] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 207317)
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 1242174)
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 81340)
+overlayState[450932] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 450932)
+assert(R.glowActive, "precondition: configured signal query did not turn glow on")
+overlayState[450932] = false
+overlayState[secretValue] = true
+SlashCmdList.SUDDEN_DOOM_GLOW("signal 450932")
+Advance(0.10)
+assert(not R.glowActive, "removed query candidate retained its previous positive result")
+overlayState[secretValue] = false
 
 -- Runtime option removal survives family rebuilds and addon reloads.
 local customRoot = 990001
@@ -693,6 +829,32 @@ assert(R.unsupportedSchema, "future SavedVariables schema was not recognized")
 assert(SuddenDoomGlowDB.schemaVersion == 99 and SuddenDoomGlowDB.futureSetting == "keep",
     "future SavedVariables were overwritten")
 assert(SDG:SetOption("enabled", false) == false, "future schema allowed setting mutation")
+local futureSettingsSnapshot = {
+    debug = SDG:GetOption("debug"),
+    enabled = SDG:GetOption("enabled"),
+    cdm = SDG:GetOption("cdm"),
+}
+local messagesBeforeFutureCommands = #messages
+SlashCmdList.SUDDEN_DOOM_GLOW("debug")
+SlashCmdList.SUDDEN_DOOM_GLOW("on")
+SlashCmdList.SUDDEN_DOOM_GLOW("cdm off")
+assert(SDG:GetOption("debug") == futureSettingsSnapshot.debug
+    and SDG:GetOption("enabled") == futureSettingsSnapshot.enabled
+    and SDG:GetOption("cdm") == futureSettingsSnapshot.cdm,
+    "slash commands changed settings under a future schema")
+assert(#messages >= messagesBeforeFutureCommands + 3,
+    "slash commands did not report refusal under a future schema")
+local futureCommandOutput = table.concat({
+    messages[messagesBeforeFutureCommands + 1],
+    messages[messagesBeforeFutureCommands + 2],
+    messages[messagesBeforeFutureCommands + 3],
+}, "\n")
+assert(select(2, futureCommandOutput:gsub("newer version", "")) == 3,
+    "future-schema slash commands did not report three explicit refusals")
+assert(not futureCommandOutput:find("Debug:", 1, true)
+    and not futureCommandOutput:find("Enabled", 1, true)
+    and not futureCommandOutput:find("Cooldown Viewer mirror:", 1, true),
+    "future-schema slash command reported a false successful update")
 
 -- Other classes initialize without registering the Death Knight runtime.
 SuddenDoomGlowDB.schemaVersion = 4

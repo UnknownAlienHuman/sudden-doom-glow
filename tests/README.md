@@ -5,9 +5,12 @@ the target interface/version metadata, and scans every loaded runtime file for
 forbidden legacy paths. The smoke harness supplies a deterministic subset of WoW
 APIs and checks persisted settings, proc signal arbitration, action mapping,
 protected-frame behavior, separate access to external parents and addon alerts,
-timer cleanup, Cooldown Viewer lifecycle handling, restored button rendering
-after temporary inaccessibility, combat-deferred deep rescans, and coalesced
-burst refreshes when bar providers publish action assignments late.
+timer cleanup, Cooldown Viewer lifecycle handling, deferred alert cleanup and
+render recovery after access returns, query reconciliation for unreadable and
+removed identifiers, combat target removal without pool enumeration,
+combat-deferred deep rescans, and coalesced burst refreshes when bar providers
+publish action assignments late. It also checks that slash commands report
+refusal when SavedVariables use a future schema.
 
 Run from the repository root:
 

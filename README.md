@@ -2,14 +2,14 @@
 
 Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto matching Death Coil, Epidemic, replacement action buttons, and configured Blizzard Cooldown Viewer items.
 
-- **Version:** 1.4.0
+- **Version:** 1.4.1
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
 - **Selected UI source:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5` (checked 2026-11-03; live head matches)
 - **SavedVariables:** `SuddenDoomGlowDB`
 - **Optional dependency:** `Blizzard_CooldownViewer`
 
-The TOC interface is target metadata. The addon's runtime client build has not been captured; see [API contracts](docs/API_CONTRACTS.md) and [live checklist](docs/LIVE_TEST_CHECKLIST.md).
+The TOC interface is target metadata. The addon's runtime client build has not been captured; see [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md) and [live checklist](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/LIVE_TEST_CHECKLIST.md).
 
 ## Detection and display
 
@@ -17,7 +17,7 @@ The addon listens to synchronous Spell Activation Overlay glow events and reconc
 
 Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. Relevant slot changes refresh immediately, followed by one coalesced next-frame pass over known buttons. Macro text is not searched to infer a castable spell.
 
-The addon owns the glow state and its frame metadata. Alert construction and geometry changes are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances and uses each item's configured base spell ID. Details and limits are in [API contracts](docs/API_CONTRACTS.md).
+The addon owns the glow state and its frame metadata. Alert construction and geometry changes are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances and uses each item's configured base spell ID. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
 
 ## Settings
 
@@ -53,7 +53,9 @@ Existing settings migrate without a database wipe. Settings from a newer schema 
 
 ## Verification and live testing
 
-The repository includes static checks and a stubbed runtime harness. They do not establish behavior in the live client. Client combat, restricted contexts, hotfixed spell IDs, UI stack compatibility, and live Cooldown Viewer layouts remain **NOT-RUN** until evidence is recorded in [VALIDATION.md](VALIDATION.md).
+The repository includes static checks and a stubbed runtime harness. They do not establish behavior in the live client. Client combat, restricted contexts, hotfixed spell IDs, UI stack compatibility, and live Cooldown Viewer layouts remain **NOT-RUN** until evidence is recorded in [VALIDATION.md](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/VALIDATION.md).
+
+Run these commands from a repository checkout; the install archive does not include the test files.
 
 ```bash
 python tests/static_checks.py .
@@ -69,7 +71,7 @@ Build the deterministic install archive with:
 python scripts/package.py
 ```
 
-The default output is `dist/SuddenDoomGlow-1.4.0.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
+The default output is `dist/SuddenDoomGlow-1.4.1.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
 
 ## Install
 

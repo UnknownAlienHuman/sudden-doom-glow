@@ -1,6 +1,6 @@
 # Architecture
 
-Release `1.4.0` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-03 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; current `live` head matches this pin. Live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
+Release `1.4.1` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-03 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; current `live` head matches this pin. Static checks, Lua 5.1.1 syntax, and stubbed runtime smoke pass; live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
 
 ## Runtime flow
 
@@ -22,7 +22,9 @@ flowchart TD
 
 ## Detection
 
-The detection authority is the Spell Activation Overlay event/query pair. `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW` and `...GLOW_HIDE` wake reconciliation; `C_SpellActivationOverlay.IsSpellOverlayed` supplies current state when its caller and inputs are allowed. The addon keeps each event spell independent, treats incomplete query evidence as unknown, and uses a bounded fallback when the query is unavailable.
+Positive overlay-query evidence is scoped to configured spell IDs. A family/configuration change triggers immediate revalidation of known button and Cooldown Viewer assignments; structural work remains deferred in combat. Owned pending hides are recovered on authoritative context events, including while the addon is disabled, without polling.
+
+Unreadable overlay event payloads still wake an authoritative query, and a missed ON transition is recovered on an authoritative context event. The detection authority is the Spell Activation Overlay event/query pair. `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW` and `...GLOW_HIDE` wake reconciliation; `C_SpellActivationOverlay.IsSpellOverlayed` supplies current state when its caller and inputs are allowed. The addon keeps each event spell independent, treats incomplete query evidence as unknown, and uses a bounded fallback when the query is unavailable.
 
 `targetRoots` comes from defaults and SavedVariables. `targetFamily` expands configured roots with base and override relationships and explicit Cooldown Viewer override events. `signalFamily` includes configured overlay aliases used for detection. A signal alias does not by itself become an action-button target.
 
@@ -46,7 +48,7 @@ Alert creation, parenting, sizing, and anchoring happen outside combat. In comba
 
 ## Persistent data
 
-`SuddenDoomGlowDB` stores user settings and `schemaVersion`. Frame maps, event signals, timers, explicit current-session overrides, and resolved spell families remain runtime-only.
+`SuddenDoomGlowDB` stores user settings and `schemaVersion`. Future schemas remain untouched and inactive; slash commands report that mutation is unavailable instead of echoing values from the scratch runtime defaults. Frame maps, event signals, timers, explicit current-session overrides, and resolved spell families remain runtime-only.
 
 ## Code map
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1 — 2026-11-03
+
+- Revalidate existing action-button and Cooldown Viewer assignments immediately when configured spell families change, including during combat.
+- Tie cached positive overlay-query results to spell IDs that remain configured.
+- Recover addon-owned pending hides on authoritative context changes while disabled, without polling.
+- Make slash commands report when a newer SavedVariables schema prevents changes instead of reporting scratch-state values.
+- Unreadable overlay payloads still wake an authoritative query; a missed ON transition is recovered on an authoritative context event.
+- Static checks, Lua 5.1.1 syntax, and stubbed runtime smoke pass. Live-client behavior remains **NOT-RUN**.
+
 ## 1.4.0 — 2026-11-03
 
 ### Retail 12.1.5
@@ -26,7 +35,7 @@
 
 ### Validation
 
-Lua 5.1 syntax, static checks, the stubbed smoke harness and package checks pass. The second pass reproduces the inaccessible-button and multi-slot burst bugs against the earlier implementation and verifies their fixes. Live-client combat, taint, event payloads, rendering and performance remain **NOT-RUN**; see [VALIDATION.md](VALIDATION.md).
+Lua 5.1 syntax, static checks, the stubbed smoke harness and package checks pass. The second pass reproduces the inaccessible-button and multi-slot burst bugs against the earlier implementation and verifies their fixes. Live-client combat, taint, event payloads, rendering and performance remain **NOT-RUN**; see [VALIDATION.md](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/VALIDATION.md).
 
 ## 1.3.1 — 2026-08-29
 

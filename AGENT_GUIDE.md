@@ -2,7 +2,7 @@
 
 ## Target and evidence
 
-- Release: `1.4.0`
+- Release: `1.4.1`
 - Target: Retail `12.1.5`; TOC interface `120105` is expected target metadata.
 - Selected Blizzard UI source: build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5`, checked `2026-11-03`; current `live` head matches this pin.
 - Live client build, combat, taint, and rendering validation: **NOT-RUN**.
@@ -10,6 +10,11 @@
 Read [SuddenDoomGlow.toc](SuddenDoomGlow.toc), [ARCHITECTURE.md](ARCHITECTURE.md), [API contracts](docs/API_CONTRACTS.md), then the relevant sections of `Core.lua`, `Options.lua`, and `Debug.lua`. Read the smoke harness and static checks before changing their contracts.
 
 ## Invariants
+
+- On configured spell-family changes, immediately revalidate existing button and Cooldown Viewer assignments even in combat; defer only structural mutations.
+- Cached positive overlay-query evidence is valid only while its spell ID remains configured.
+- Recover owned pending hides on authoritative context events even when disabled; do not add polling.
+- When future SavedVariables schemas block mutation, slash commands must report the refusal instead of scratch-state values.
 
 - Use overlay events and `C_SpellActivationOverlay.IsSpellOverlayed` for proc state. Do not restore aura, combat-log, resource-cost, cooldown, usability, or timing inference.
 - A readable true can enable the glow. OFF is authoritative only when every configured candidate is readable and false. Keep the synchronous SHOW grace and bounded unavailable-query fallback.
@@ -42,4 +47,4 @@ lua tests/runtime_smoke.lua Core.lua
 python scripts/package.py
 ```
 
-The install archive must contain one top-level `SuddenDoomGlow/` directory with exactly the packager's runtime and user-facing release allowlist. The archive excludes repository guidance, tests, and validation records. Stub checks do not prove live-client behavior. See [VALIDATION.md](VALIDATION.md).
+The install archive must contain one top-level `SuddenDoomGlow/` directory with exactly the packager's runtime and user-facing release allowlist. The archive excludes repository guidance, tests, and validation records. Stub checks do not prove live-client behavior. See [VALIDATION.md](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/VALIDATION.md).
