@@ -1,6 +1,6 @@
 # Donor implementation review
 
-Reviewed 2026-11-04. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
+Reviewed and branch-head rechecked 2026-11-04 for release 1.4.5. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
 
 ## Pins
 

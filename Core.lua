@@ -25,6 +25,7 @@ local issecretvalue = _G.issecretvalue
 
 local CURRENT_SCHEMA = 5
 local MAX_CONFIGURED_SPELL_IDS = 32
+local MAX_RESOLVED_SPELL_IDS = 128
 local RESCAN_DELAY = 0.08
 local OVERLAY_RECONCILE_DELAY = 0.06
 local OVERLAY_SHOW_GRACE = 0.20
@@ -63,6 +64,8 @@ local R = {
 
     trackedButtons = NewWeakKeyTable(),
     knownButtons = NewWeakKeyTable(),
+    buttonSlots = NewWeakKeyTable(),
+    buttonsBySlot = {},
     frameState = NewWeakKeyTable(),
     pendingHides = NewWeakKeyTable(),
 
@@ -85,6 +88,8 @@ local R = {
     needsRescan = false,
     rescanDeep = false,
     rescanReason = nil,
+    pendingActionSlots = {},
+    actionRefreshAll = false,
 
     actionCallbackAttached = false,
     actionCallbackOwner = {},
@@ -371,9 +376,10 @@ local function GetOverrideSpellID(spellID)
     return spellID
 end
 
-local function AddUniqueID(set, list, value)
+local function AddUniqueID(set, list, value, limit)
     local id = SafeID(value)
     if not id or set[id] then return false end
+    if limit and #list >= limit then return false end
     set[id] = true
     list[#list + 1] = id
     return true
@@ -386,7 +392,7 @@ local function AddTargetFamilyChain(spellID, depth)
     spellID = SafeID(spellID)
     if not spellID then return end
 
-    if not AddUniqueID(R.targetFamily, R.targetFamilyList, spellID) then return end
+    if not AddUniqueID(R.targetFamily, R.targetFamilyList, spellID, MAX_RESOLVED_SPELL_IDS) then return end
     local baseID = GetBaseSpellID(spellID)
     if baseID and baseID ~= spellID then
         AddTargetFamilyChain(baseID, depth + 1)
@@ -410,7 +416,7 @@ local function RebuildSpellFamilies()
         local configuredID = SafeID(DB.targetSpellIDs[i])
         if configuredID then
             local baseID = GetBaseSpellID(configuredID) or configuredID
-            AddUniqueID(R.targetRoots, R.targetRootList, baseID)
+            AddUniqueID(R.targetRoots, R.targetRootList, baseID, MAX_CONFIGURED_SPELL_IDS)
             AddTargetFamilyChain(configuredID, 0)
             AddTargetFamilyChain(baseID, 0)
         end
@@ -422,11 +428,13 @@ local function RebuildSpellFamilies()
         end
     end
 
-    for i = 1, #R.targetFamilyList do
-        AddUniqueID(R.signalFamily, R.signalFamilyList, R.targetFamilyList[i])
-    end
+    -- Explicit signal configuration is authoritative and must not be displaced
+    -- by a large replacement family. Target variants use only the remaining budget.
     for i = 1, math.min(#DB.signalSpellIDs, MAX_CONFIGURED_SPELL_IDS) do
-        AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i])
+        AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i], MAX_RESOLVED_SPELL_IDS)
+    end
+    for i = 1, #R.targetFamilyList do
+        AddUniqueID(R.signalFamily, R.signalFamilyList, R.targetFamilyList[i], MAX_RESOLVED_SPELL_IDS)
     end
     if R.lastQuerySpellID and not R.signalFamily[R.lastQuerySpellID] then
         ClearQueryObservation()
@@ -442,7 +450,7 @@ local function IsTargetFamilySpell(spellID, learn)
     if baseID and (R.targetRoots[baseID] or R.targetFamily[baseID]) then
         if learn then
             AddTargetFamilyChain(spellID, 0)
-            AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
+            AddUniqueID(R.signalFamily, R.signalFamilyList, spellID, MAX_RESOLVED_SPELL_IDS)
         end
         return true
     end
@@ -454,7 +462,7 @@ local function IsTargetFamilySpell(spellID, learn)
             if learn then
                 R.explicitOverrides[rootID] = spellID
                 AddTargetFamilyChain(spellID, 0)
-                AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
+                AddUniqueID(R.signalFamily, R.signalFamilyList, spellID, MAX_RESOLVED_SPELL_IDS)
             end
             return true
         end
@@ -497,8 +505,8 @@ local function IsRelevantSignal(spellID)
     if not spellID then return false end
     if R.signalFamily[spellID] then return true end
     if IsTargetFamilySpell(spellID, true) then
-        AddUniqueID(R.signalFamily, R.signalFamilyList, spellID)
-        return true
+        AddUniqueID(R.signalFamily, R.signalFamilyList, spellID, MAX_RESOLVED_SPELL_IDS)
+        return R.signalFamily[spellID] == true
     end
     return false
 end
@@ -561,6 +569,34 @@ local function GetButtonSlot(button)
     return nil
 end
 
+local function SetButtonSlotIndex(button, slot)
+    local oldSlot = R.buttonSlots[button]
+    if oldSlot == slot then return end
+
+    if oldSlot then
+        local oldSet = R.buttonsBySlot[oldSlot]
+        if oldSet then
+            oldSet[button] = nil
+            if not next(oldSet) then R.buttonsBySlot[oldSlot] = nil end
+        end
+    end
+
+    R.buttonSlots[button] = slot
+    if slot then
+        local slotSet = R.buttonsBySlot[slot]
+        if not slotSet then
+            slotSet = NewWeakKeyTable()
+            R.buttonsBySlot[slot] = slotSet
+        end
+        slotSet[button] = true
+    end
+end
+
+local function ClearButtonSlotIndex()
+    ClearMap(R.buttonSlots)
+    ClearMap(R.buttonsBySlot)
+end
+
 local function IsCurrentTargetButton(button)
     local slot = GetButtonSlot(button)
     return slot and SlotMatchesTarget(slot) or false
@@ -581,15 +617,23 @@ end
 local function GetFrameState(frame)
     local state = R.frameState[frame]
     if not state then
-        state = { alert = nil, shown = false, animating = false, geometryReady = false, renderTarget = nil, isCDM = false }
+        state = { alert = nil, shown = false, animating = false, geometryReady = false, renderTarget = nil, sizeHookTargets = nil, isCDM = false }
         R.frameState[frame] = state
     end
     return state
 end
 
 local function RefreshAlertGeometry(frame, state)
-    if InCombat() then R.needsGeometry = true; return state.geometryReady end
-    if not FrameCanBeUsed(state.alert) then R.needsGeometry = true; return state.geometryReady end
+    if InCombat() then
+        state.geometryReady = false
+        R.needsGeometry = true
+        return false
+    end
+    if not FrameCanBeUsed(state.alert) then
+        state.geometryReady = false
+        R.needsGeometry = true
+        return false
+    end
     local target = GetRenderTarget(frame)
     if not target then
         state.geometryReady = false
@@ -621,16 +665,35 @@ local function RefreshAlertGeometry(frame, state)
     else
         geometryOK = pcall(state.alert.SetAllPoints, state.alert, target) and geometryOK
     end
+
+    if geometryOK and type(target.GetFrameLevel) == "function" and type(state.alert.SetFrameLevel) == "function" then
+        local ok, level = pcall(target.GetFrameLevel, target)
+        level = ok and SafeNumber(level) or nil
+        if level then
+            geometryOK = pcall(state.alert.SetFrameLevel, state.alert, level + 20)
+        end
+    end
+
+    if geometryOK and type(target.HookScript) == "function" then
+        local hookedTargets = state.sizeHookTargets
+        if not hookedTargets then
+            hookedTargets = NewWeakKeyTable()
+            state.sizeHookTargets = hookedTargets
+        end
+        if not hookedTargets[target] then
+            local hooked = pcall(target.HookScript, target, "OnSizeChanged", function()
+                if not RuntimeEnabled() then return end
+                state.geometryReady = false
+                RefreshAlertGeometry(frame, state)
+            end)
+            if hooked then hookedTargets[target] = true else geometryOK = false end
+        end
+    end
+
     if not geometryOK then
         state.geometryReady = false
         R.needsGeometry = true
         return false
-    end
-
-    if type(target.GetFrameLevel) == "function" and type(state.alert.SetFrameLevel) == "function" then
-        local ok, level = pcall(target.GetFrameLevel, target)
-        level = ok and SafeNumber(level) or nil
-        if level then pcall(state.alert.SetFrameLevel, state.alert, level + 20) end
     end
 
     state.renderTarget = target
@@ -642,7 +705,11 @@ local function EnsureAlert(frame)
     if not FrameCanBeUsed(frame) then return nil end
     local state = GetFrameState(frame)
     if state.alert then
-        if not FrameCanBeUsed(state.alert) then return nil end
+        if not FrameCanBeUsed(state.alert) then
+            state.geometryReady = false
+            R.needsGeometry = true
+            return nil
+        end
         if not state.geometryReady and not RefreshAlertGeometry(frame, state) then return nil end
         return state.alert
     end
@@ -664,12 +731,6 @@ local function EnsureAlert(frame)
     state.geometryReady = false
     pcall(alert.Hide, alert)
     local geometryReady = RefreshAlertGeometry(frame, state)
-    if type(target.HookScript) == "function" then
-        pcall(target.HookScript, target, "OnSizeChanged", function()
-            if not RuntimeEnabled() then return end
-            RefreshAlertGeometry(frame, state)
-        end)
-    end
     return geometryReady and alert or nil
 end
 
@@ -760,6 +821,7 @@ end
 
 local function RefreshButton(button, slot)
     if not IsAccessible(button) or not button then return end
+    SetButtonSlotIndex(button, slot)
     if slot and SlotMatchesTarget(slot) then
         R.trackedButtons[button] = true
         EnsureAlert(button)
@@ -881,6 +943,10 @@ local function RefreshCDMFrame(frame)
     if R.glowActive then ShowFrameGlow(frame) else HideFrameGlow(frame) end
 end
 
+local CDM_ITEM_HOOK_METHODS = {
+    "SetCooldownID", "SetOverrideSpell", "ClearCooldownID", "ResetCooldownData",
+}
+
 local function HookCDMItem(frame)
     if not IsAccessible(frame) or not frame then return end
     if InCombat() then
@@ -894,14 +960,15 @@ local function HookCDMItem(frame)
     end
     local hooked = R.cdmItemHooks[frame]
     if not hooked then hooked = {}; R.cdmItemHooks[frame] = hooked end
-    for _, name in ipairs({ "SetCooldownID", "SetOverrideSpell", "ClearCooldownID", "ResetCooldownData" }) do
+    for i = 1, #CDM_ITEM_HOOK_METHODS do
+        local name = CDM_ITEM_HOOK_METHODS[i]
         if not hooked[name] and type(frame[name]) == "function" then
             local clear = name == "ClearCooldownID" or name == "ResetCooldownData"
-            hooksecurefunc(frame, name, function(item)
+            local ok = pcall(hooksecurefunc, frame, name, function(item)
                 if not RuntimeEnabled() or not DB.cdm then return end
                 if clear then ClearCDMFrame(item) else RefreshCDMFrame(item) end
             end)
-            hooked[name] = true
+            if ok then hooked[name] = true end
         end
     end
 end
@@ -956,7 +1023,7 @@ local function ReconcileCDMFrames()
                not R.cdmViewerHooks[viewer] and type(viewer.OnAcquireItemFrame) == "function" then
                 -- Mixins are copied into frames. Hook the actual instance, including
                 -- instances created before this addon was loaded.
-                hooksecurefunc(viewer, "OnAcquireItemFrame", function(_, item)
+                local hooked = pcall(hooksecurefunc, viewer, "OnAcquireItemFrame", function(_, item)
                     if not RuntimeEnabled() or not DB.cdm or not IsAccessible(item) or not item then return end
                     if InCombat() then
                         HideFrameGlow(item)
@@ -970,7 +1037,7 @@ local function ReconcileCDMFrames()
                     HookCDMItem(item)
                     RefreshCDMFrame(item)
                 end)
-                R.cdmViewerHooks[viewer] = true
+                if hooked then R.cdmViewerHooks[viewer] = true end
             end
             if not EnumerateCDMViewer(viewer, seen) then allReadable = false end
         end
@@ -1165,12 +1232,41 @@ end
 
 local function RefreshKnownButtons(changedSlot)
     if not RuntimeEnabled() then return end
-    for button in pairs(R.knownButtons) do
-        local slot = GetButtonSlot(button)
-        if not changedSlot or slot == changedSlot then
-            RefreshButton(button, slot)
+    if changedSlot then
+        local slotSet = R.buttonsBySlot[changedSlot]
+        if not slotSet then return end
+        for button in pairs(slotSet) do
+            RefreshButton(button, GetButtonSlot(button))
         end
+        return
     end
+
+    for button in pairs(R.knownButtons) do
+        RefreshButton(button, GetButtonSlot(button))
+    end
+end
+
+local function QueueActionRefresh(changedSlot)
+    if changedSlot then
+        R.pendingActionSlots[changedSlot] = true
+    else
+        R.actionRefreshAll = true
+        ClearMap(R.pendingActionSlots)
+    end
+    if R.timers["action-refresh"] then return end
+    ScheduleTimer("action-refresh", 0, function()
+        if R.actionRefreshAll then
+            R.actionRefreshAll = false
+            ClearMap(R.pendingActionSlots)
+            RefreshKnownButtons()
+            return
+        end
+        local pendingSlots = R.pendingActionSlots
+        R.pendingActionSlots = {}
+        for slot in pairs(pendingSlots) do
+            RefreshKnownButtons(slot)
+        end
+    end)
 end
 
 local function RefreshAssignments()
@@ -1276,6 +1372,8 @@ local function ResetTransientState(clearOverrides)
     R.testUntil = 0
     R.needsRescan, R.rescanDeep = false, false
     R.rescanReason = nil
+    R.actionRefreshAll = false
+    ClearMap(R.pendingActionSlots)
     if clearOverrides then ClearMap(R.explicitOverrides) end
     SetGlow(false, true)
 end
@@ -1290,6 +1388,7 @@ local function StopRuntime()
     ResetTransientState(true)
     for item in pairs(R.cdmFrames) do ClearCDMFrame(item) end
     ClearMap(R.trackedButtons)
+    ClearButtonSlotIndex()
     UpdateRecoveryEvents()
     R.lastDetection = "disabled"
 end
@@ -1439,10 +1538,15 @@ local function OnEvent(_, event, ...)
         if not relevant or not changed then return end
         QueueMappingRecovery(event, false)
     elseif event == "PLAYER_REGEN_ENABLED" then
-        RefreshAssignments()
-        if R.needsGeometry then PrimeTrackedAlerts() end
-        if R.needsRescan then SDG:RequestRescan(event)
-        else ReconcileGlow(event) end
+        if R.needsRescan then
+            -- One settled post-combat rescan owns assignments, viewer recovery,
+            -- geometry, and proc reconciliation; do not duplicate the full pass.
+            SDG:RequestRescan(event)
+        else
+            RefreshAssignments()
+            if R.needsGeometry then PrimeTrackedAlerts() end
+            ReconcileGlow(event)
+        end
     elseif event == "PLAYER_REGEN_DISABLED" then
         ReconcileGlow(event)
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -1481,12 +1585,9 @@ local function OnEvent(_, event, ...)
     else
         local changedSlot = event == "ACTIONBAR_SLOT_CHANGED" and SafeID((...)) or nil
         if changedSlot then RefreshKnownButtons(changedSlot) end
-        -- Bar providers can publish current assignments after the native event.
-        -- One unfiltered next-frame pass covers the complete burst. Action events
-        -- do not wake the independent proc-state query.
-        if not R.timers["action-refresh"] then
-            ScheduleTimer("action-refresh", 0, RefreshKnownButtons)
-        end
+        -- One-slot changes stay targeted. Paging/modifier/vehicle and broad slot
+        -- invalidations collapse into one complete next-frame assignment pass.
+        QueueActionRefresh(changedSlot)
     end
 end
 
@@ -1515,7 +1616,8 @@ local function DumpStatus()
     Print(("buttons=%d cdm=%d query=%d/%d authoritative=%s eventSignals=%d")
         :format(CountEntries(R.trackedButtons), CountEntries(R.cdmFrames), R.overlayQueryReadable,
             R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountEntries(R.eventSignals)))
-    Print(("configured ID limit: %d per list"):format(MAX_CONFIGURED_SPELL_IDS))
+    Print(("ID limits: configured=%d resolved=%d per family")
+        :format(MAX_CONFIGURED_SPELL_IDS, MAX_RESOLVED_SPELL_IDS))
     Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
     Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
     Print("signals resolved: " .. FormatIDList(R.signalFamilyList))

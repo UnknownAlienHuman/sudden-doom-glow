@@ -1,6 +1,6 @@
 # Architecture
 
-Release `1.4.4` targets Retail 12.1.5 with expected interface `120105`. Current live source `12.1.5.70783` was checked on 2026-11-04; the relevant ActionBar, Spell Activation Overlay, alert-template, Settings, and Cooldown Viewer contracts remain compatible with the selected KB baseline. Named-client behavior remains **NOT-RUN**.
+Release `1.4.5` targets Retail 12.1.5 with expected interface `120105`. Current live source `12.1.5.70783` was checked on 2026-11-04; the relevant ActionBar, Spell Activation Overlay, alert-template, Settings, and Cooldown Viewer contracts remain compatible with knowledge-base revision `c2a630aa186de401262663cc8568a77988be69df` and its selected UI-source baseline. Named-client behavior remains **NOT-RUN**.
 
 ## Runtime flow
 
@@ -35,17 +35,17 @@ Action-bar events update assignment ownership only. Mapping invalidations coales
 
 ## Spell identity and bounds
 
-`targetSpellIDs` and `signalSpellIDs` are validated ordinary integer arrays, capped at 32 entries each. `targetFamily` expands configured roots through `C_Spell.GetBaseSpell`, `C_Spell.GetOverrideSpell`, and explicit Cooldown Viewer override pairs. `signalFamily` adds configured overlay aliases. An alias does not become an action-button target merely because it produced an event.
+`targetSpellIDs` and `signalSpellIDs` are validated ordinary integer arrays, capped at 32 entries each. Resolved target and signal families are independently capped at 128 IDs so replacement learning cannot turn overlay reconciliation into unbounded work. Configured signal aliases reserve their budget before learned target variants. `targetFamily` expands configured roots through `C_Spell.GetBaseSpell`, `C_Spell.GetOverrideSpell`, and explicit Cooldown Viewer override pairs. An alias does not become an action-button target merely because it produced an event.
 
 ## Action buttons
 
 Known stock and supported third-party button surfaces are weakly tracked. The current action slot is resolved from the button's authoritative provider; `C_ActionBar.GetSpell` is primary, with a resolved action/macro fallback only when ordinary and available. Named adapters cover current `BT4ButtonN`, `ElvUI_BarXButtonY`, `DominosActionButtonN`, and Dominos `MultiBar*ActionButtonN` families; the exact donor pins and limits are recorded in `docs/DONOR_REVIEW.md`.
 
-One-slot changes get a targeted refresh. Bursty/broad invalidations collapse into one complete pass. There is no 540-slot sweep, macro-body parsing, per-frame polling, or action-event proc query.
+Known buttons maintain one weak reverse index from current action slot to button. A nonzero `ACTIONBAR_SLOT_CHANGED(slot)` performs an immediate targeted refresh and one coalesced targeted next-frame retry; broad slot/page/modifier/vehicle invalidations collapse into one complete pass. If combat exit already requires a settled structural rescan, that rescan alone owns assignment, viewer, geometry, and proc recovery. There is no 540-slot sweep, macro-body parsing, per-frame polling, or action-event proc query.
 
 ## Cooldown Viewer
 
-The adapter uses public data/override/hotfix events as wake-ups and source-verified private instance methods as a narrow compatibility boundary. Viewer pools are enumerated only during setup/recovery outside combat. Actual viewer/item instances are post-hooked once. Item identity uses `GetBaseSpellID`; linked managed aura state is never inspected.
+The adapter uses public data/override/hotfix events as wake-ups and source-verified private instance methods as a narrow compatibility boundary. Viewer pools are enumerated only during setup/recovery outside combat. Actual viewer/item instances are post-hooked once; installation failures are contained, never marked successful, and retried only on a later lifecycle pass. Item identity uses `GetBaseSpellID`; linked managed aura state is never inspected.
 
 A complete readable generation covering all four selected viewers may prune unseen items. Missing, inaccessible, or unreadable viewers/pools are incomplete evidence and cannot authorize pruning. During combat, only observed items and existing alerts are reused.
 
@@ -53,7 +53,7 @@ A complete readable generation covering all four selected viewers may prune unse
 
 Frame state is held in weak-key addon tables. The addon creates its own `ActionButtonSpellAlertTemplate` child and never joins or patches `ActionButtonSpellAlertManager`.
 
-Show/hide is idempotent. Visibility, animation, and geometry readiness are tracked separately. Structural geometry failures remain dirty and retry on an authoritative lifecycle pass; inaccessible OFF transitions become owned pending hides. No polling is used.
+Show/hide is idempotent. Visibility, animation, and geometry readiness are tracked separately. Every current render target owns at most one size-change hook. Failed access, hook, frame-level, anchor, parent, or size operations remain dirty and retry on an authoritative lifecycle pass; inaccessible OFF transitions become owned pending hides. No polling is used.
 
 ## Settings and persistence
 

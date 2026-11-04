@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.5 — 2026-11-04
+
+- Re-read the current engineering knowledge base at `c2a630aa186de401262663cc8568a77988be69df` and recheck the current Blizzard live source and pinned donor branch heads.
+- Add a weak reverse button-slot index so nonzero `ACTIONBAR_SLOT_CHANGED` bursts update only current owners immediately and in a coalesced targeted retry; broad assignment events retain one full pass, and combat exit no longer performs that pass twice before a required rescan.
+- Cap resolved target and signal families at 128 IDs and reserve configured signal aliases before learned replacements, bounding overlay-query and event-timer work independently of SavedVariables limits.
+- Treat Cooldown Viewer item/viewer post-hook installation as fallible: failures no longer escape or become false-positive registrations and are retried only on later lifecycle recovery.
+- Keep geometry dirty when alert access, frame level, anchoring, parenting, sizing, or render-target size-hook installation fails; attach at most one size hook to each current render target.
+- Extend focused regressions for targeted slot dispatch, family saturation, foreign hook retry, render-target replacement, and geometry failure recovery. Named-client validation remains **NOT-RUN**.
+
 ## 1.4.4 — 2026-11-04
 
 - Audit current WeakAuras, Bartender4, LibActionButton, Dominos, ElvUI, and LibCustomGlow implementations against the knowledge-base rules; record exact pins and rejected transfers.

@@ -2,9 +2,9 @@
 
 ## Target and evidence
 
-- Release: `1.4.4`
+- Release: `1.4.5`
 - Target: Retail `12.1.5`; expected TOC interface `120105`
-- Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`
+- Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@c2a630aa186de401262663cc8568a77988be69df`
 - KB-selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
 - Current live-source recheck: `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`, checked `2026-11-04`
 - Named-client combat, taint, rendering, and performance: **NOT-RUN**
@@ -24,7 +24,8 @@ Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, and both 
 - Cooldown Viewer integration is source-coupled: public readiness event, actual-instance post-hooks, configured `GetBaseSpellID`, bounded recovery enumeration, and no pruning from partial evidence.
 - Hotfix/talent/spell invalidations rebuild mapping identity without inventing a proc edge or restarting a valid animation.
 - Settings are ordinary SavedVariables fields registered through `Settings.RegisterAddOnSetting`; migration and runtime side effects remain addon-owned.
-- Target and signal lists are capped at 32 IDs each. Work must remain bounded.
+- Configured target and signal lists are capped at 32 IDs each; resolved runtime families are capped at 128 IDs each, with configured signal aliases reserved before learned variants.
+- Maintain one reverse button-to-slot index. Nonzero slot changes stay targeted; only broad assignment invalidations may walk all known buttons.
 - Future SavedVariables schemas remain untouched and inactive.
 - The addon table passed as the second TOC vararg is the only shared Lua namespace. Do not restore `_G.SuddenDoomGlow`.
 

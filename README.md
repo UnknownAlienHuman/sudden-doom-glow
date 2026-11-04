@@ -2,7 +2,7 @@
 
 Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto matching Death Coil, Epidemic, replacement action buttons, and configured Blizzard Cooldown Viewer items.
 
-- **Version:** 1.4.4
+- **Version:** 1.4.5
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
 - **Current live UI source:** build `12.1.5.70783`, commit `297d7aaaa736f346b3e036f38ee088eaf7f8c07f` (checked 2026-11-04)
@@ -16,9 +16,9 @@ The TOC interface is target metadata. The addon's runtime client build has not b
 
 The addon listens to synchronous Spell Activation Overlay glow events and reconciles them against `C_SpellActivationOverlay.IsSpellOverlayed`. A readable `true` can turn the glow on. OFF is authoritative only when all configured candidates are readable and false. SHOW ordering receives a short grace; unavailable query state uses a bounded event fallback. Simultaneous spell IDs remain independent.
 
-Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. Relevant slot changes refresh immediately, followed by one coalesced next-frame pass over known buttons. Action assignment events do not independently query proc state. Macro text is not searched to infer a castable spell.
+Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. A nonzero slot change refreshes only buttons currently indexed to that slot, both immediately and in one coalesced next-frame retry. Broad page, modifier, vehicle, override, macro, and slot invalidations share one complete pass. Action assignment events do not independently query proc state. Macro text is not searched to infer a castable spell.
 
-The addon owns the glow state and its frame metadata. Alert construction, Cooldown Viewer pool discovery, and new lifecycle hooks are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances, recovers from the public data-ready event, access-gates external pool tables, and uses each item's configured base spell ID. Partial observations never authorize pruning. Current Bartender4, Dominos, ElvUI, WeakAuras/LibCustomGlow, and LibActionButton evidence is recorded in the [donor review](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/DONOR_REVIEW.md); donor code is not treated as API authority. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
+The addon owns the glow state and its frame metadata. Alert construction, geometry repair, Cooldown Viewer pool discovery, and new lifecycle hooks are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances, recovers from the public data-ready event, access-gates external pool tables, retries failed foreign hook installation only on later lifecycle passes, and uses each item's configured base spell ID. Partial observations never authorize pruning. Current Bartender4, Dominos, ElvUI, WeakAuras/LibCustomGlow, and LibActionButton evidence is recorded in the [donor review](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/DONOR_REVIEW.md); donor code is not treated as API authority. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
 
 ## Settings
 
@@ -48,7 +48,7 @@ Settings use native `RegisterAddOnSetting` fields after deterministic migration 
 
 `/sdglow aura <spellID>` remains a compatibility alias for `/sdglow signal <spellID>`.
 
-Default target spells are Death Coil (`47541`), Epidemic (`207317`) and Necrotic Coil (`1242174`). Detection also includes the Sudden Doom signal aliases `450932` and `81340`. The spell/signal commands toggle configured IDs; removals persist across updates and reloads. Each list is capped at 32 IDs so overlay queries and SavedVariables normalization remain bounded. Base spells and their replacements form one target family, so a remaining configured replacement can still include its base spell.
+Default target spells are Death Coil (`47541`), Epidemic (`207317`) and Necrotic Coil (`1242174`). Detection also includes the Sudden Doom signal aliases `450932` and `81340`. The spell/signal commands toggle configured IDs; removals persist across updates and reloads. Each configured list is capped at 32 IDs. Resolved target and signal families are separately capped at 128 IDs; explicit signal aliases reserve their slots before dynamically learned replacements. Base spells and their replacements form one target family, so a remaining configured replacement can still include its base spell.
 
 Existing settings migrate without a database wipe. Settings from a newer schema are preserved and left inactive until a compatible addon version is installed.
 
@@ -73,7 +73,7 @@ Build the deterministic install archive with:
 python scripts/package.py
 ```
 
-The default output is `dist/SuddenDoomGlow-1.4.4.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
+The default output is `dist/SuddenDoomGlow-1.4.5.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
 
 ## Install
 

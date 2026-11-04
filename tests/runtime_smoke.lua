@@ -223,7 +223,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.4" end end }
+C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.5" end end }
 
 local baseMap = { [1242174] = 47541 }
 local overrideMap = { [47541] = 1242174 }

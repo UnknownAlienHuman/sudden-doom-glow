@@ -2,7 +2,7 @@
 
 ## Evidence pins
 
-- Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`
+- Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@c2a630aa186de401262663cc8568a77988be69df`
 - KB-selected UI source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
 - Current live-source recheck: `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`, checked 2026-11-04
 
@@ -32,6 +32,7 @@ The addon creates an addon-owned child from `ActionButtonSpellAlertTemplate` and
 The selected source supplies four viewer instances, active `itemFramePool` objects, `OnAcquireItemFrame`, and item lifecycle methods (`SetCooldownID`, `SetOverrideSpell`, `ClearCooldownID`, `ResetCooldownData`). The adapter:
 
 - hooks actual instances once and only outside combat;
+- treats post-hook installation as a fallible foreign boundary, records success only after the hook is installed, and retries only on a later lifecycle pass;
 - enumerates pools only for bounded setup/recovery;
 - reads configured `GetBaseSpellID` only;
 - clears on proved reset/reassignment;
@@ -41,6 +42,14 @@ The selected source supplies four viewer instances, active `itemFramePool` objec
 ### Settings
 
 `enabled`, `cdm`, `debug`, and `glowScale` are ordinary fields, so `Options.lua` uses `Settings.RegisterAddOnSetting`. Migration, validation, normalization, and runtime effects remain in `Core.lua`. Proxy settings are intentionally absent.
+
+## Bounded runtime work
+
+SavedVariables accept at most 32 configured target IDs and 32 configured signal IDs. Runtime replacement expansion has a separate 128-ID cap per resolved family. Explicit configured signal aliases are inserted first so learned target variants cannot evict proc-authority candidates.
+
+Known buttons maintain one weak reverse action-slot index. `ACTIONBAR_SLOT_CHANGED(slot > 0)` updates only that slot's current owners immediately and in one coalesced targeted retry. Page, modifier, vehicle, override, macro, and broad slot invalidations share one complete next-frame pass. A required post-combat structural rescan replaces, rather than follows, a duplicate complete assignment pass. Proc-state queries remain independent from assignment events.
+
+Alert geometry is complete only after parent, anchors/size, frame level, and the current render target's size hook succeed. A temporary access or mutation failure remains dirty; prior geometry readiness is not reused as proof of completion.
 
 ## External implementation evidence
 

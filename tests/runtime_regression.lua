@@ -39,7 +39,7 @@ local function NewFrame(name, template)
         shown = template ~= "ActionButtonSpellAlertTemplate",
         events = {}, scripts = {}, hooks = {}, attributes = {},
         width = 40, height = 40, frameLevel = 1,
-        showCount = 0, hideCount = 0, gateLog = nil,
+        showCount = 0, hideCount = 0, gateLog = nil, slotReadCount = 0,
     }
     function frame:CanBeAccessedInContext()
         if self.gateLog then self.gateLog[#self.gateLog + 1] = "access" end
@@ -57,7 +57,10 @@ local function NewFrame(name, template)
         self.events[event] = true
     end
     function frame:SetScript(script, callback) self.scripts[script] = callback end
-    function frame:HookScript(script, callback) self.hooks[script] = callback end
+    function frame:HookScript(script, callback)
+        if self.failHookScript then error("HookScript failed") end
+        self.hooks[script] = callback
+    end
     function frame:GetObjectType() return "Button" end
     function frame:GetSize() return self.width, self.height end
     function frame:SetSize(w, h) assert(not inCombat, "SetSize in combat"); self.width, self.height = w, h end
@@ -66,8 +69,15 @@ local function NewFrame(name, template)
     function frame:SetAllPoints() assert(not inCombat, "SetAllPoints in combat") end
     function frame:SetParent(parent) assert(not inCombat, "SetParent in combat"); self.parent = parent end
     function frame:GetFrameLevel() return self.frameLevel end
-    function frame:SetFrameLevel(level) assert(not inCombat, "SetFrameLevel in combat"); self.frameLevel = level end
-    function frame:GetPagedID() return self.pagedAction or self.action end
+    function frame:SetFrameLevel(level)
+        assert(not inCombat, "SetFrameLevel in combat")
+        if self.failSetFrameLevel then error("SetFrameLevel failed") end
+        self.frameLevel = level
+    end
+    function frame:GetPagedID()
+        self.slotReadCount = self.slotReadCount + 1
+        return self.pagedAction or self.action
+    end
     function frame:GetAction() return self.action end
     function frame:GetAttribute(key) return self.attributes[key] end
     function frame:Show()
@@ -143,10 +153,11 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.4" or nil end }
+C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.5" or nil end }
 local currentOverrideSpellID = 1242174
 C_Spell = {
     GetBaseSpell = function(spellID)
+        if spellID >= 800001 and spellID <= 800400 then return 47541 end
         return (spellID == 1242174 or spellID == 777001) and 47541 or spellID
     end,
     GetOverrideSpell = function(spellID)
@@ -173,6 +184,11 @@ function EventRegistry:UnregisterCallback(event, owner)
 end
 
 function hooksecurefunc(target, methodName, hook)
+    if target.hookFailures and target.hookFailures[methodName] then
+        target.hookFailures[methodName] = target.hookFailures[methodName] - 1
+        if target.hookFailures[methodName] <= 0 then target.hookFailures[methodName] = nil end
+        error("hook installation failed")
+    end
     local original = assert(target[methodName], methodName)
     target[methodName] = function(...)
         local values = { original(...) }
@@ -312,11 +328,24 @@ Fire("COOLDOWN_VIEWER_DATA_LOADED")
 Advance(0.2)
 assert(cdmEnumerations > enumBeforeDataReady, "public CDM data readiness did not trigger recovery")
 
--- Action invalidations refresh assignments without querying proc state.
+-- One-slot invalidation touches only buttons already indexed to that slot;
+-- the next-frame broad pass still covers providers that settle after the event.
+ActionButton1.slotReadCount = 0
+ActionButton2.slotReadCount = 0
+MultiBarRightActionButton1.slotReadCount = 0
 queryCalls = 0
 Fire("ACTIONBAR_SLOT_CHANGED", 1)
+assert(ActionButton1.slotReadCount > 0 and MultiBarRightActionButton1.slotReadCount > 0,
+    "targeted slot refresh missed current slot owners")
+assert(ActionButton2.slotReadCount == 0,
+    "one-slot invalidation scanned an unrelated known button")
+Advance(0)
+assert(ActionButton2.slotReadCount == 0,
+    "deferred one-slot recovery became an unrelated full scan")
 Fire("ACTIONBAR_PAGE_CHANGED")
 Advance(0)
+assert(ActionButton2.slotReadCount > 0,
+    "coalesced broad assignment recovery did not run")
 assert(queryCalls == 0, "action events queried independent proc state")
 
 -- A CDM table hotfix must not toggle an already active glow or restart art.
@@ -378,6 +407,38 @@ actionAlert.ProcLoop.accessible = true
 Fire("PLAYER_REGEN_ENABLED")
 assert(actionState.animating, "lifecycle wake did not recover missed animation")
 
+-- Pageable non-target alerts must retain geometry recovery ownership even when
+-- their alert is temporarily inaccessible, and a later render target is hooked once.
+local dormantState = assert(R.frameState[ActionButton2])
+local dormantAlert = assert(dormantState.alert)
+dormantAlert.accessible = false
+assert(SDG:SetOption("glowScale", 1.5))
+assert(R.needsGeometry and not dormantState.geometryReady,
+    "inaccessible dormant alert lost its geometry recovery state")
+dormantAlert.accessible = true
+local iconTarget = NewFrame("ActionButton2Icon")
+function iconTarget:GetObjectType() return "Frame" end
+ActionButton2.Icon = iconTarget
+iconTarget.failHookScript = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(R.needsGeometry and not dormantState.geometryReady and not iconTarget.hooks.OnSizeChanged,
+    "failed size-hook installation was incorrectly marked complete")
+iconTarget.failHookScript = nil
+Fire("PLAYER_REGEN_ENABLED")
+assert(dormantState.geometryReady and not R.needsGeometry,
+    "geometry recovery did not complete after access returned")
+assert(iconTarget.hooks.OnSizeChanged,
+    "replacement render target did not receive one size-change recovery hook")
+
+dormantAlert.failSetFrameLevel = true
+assert(SDG:SetOption("glowScale", 1.6))
+assert(R.needsGeometry and not dormantState.geometryReady,
+    "failed frame-level mutation was incorrectly marked complete")
+dormantAlert.failSetFrameLevel = nil
+Fire("PLAYER_REGEN_ENABLED")
+assert(dormantState.geometryReady and not R.needsGeometry,
+    "frame-level recovery did not complete")
+
 -- Missing one selected viewer is incomplete evidence and cannot prune an item
 -- omitted from another readable pool during the same transition.
 local savedUtility = UtilityCooldownViewer
@@ -401,9 +462,22 @@ assert(R.cdmFrames[cdmItem], "failed viewer pool access probe pruned tracked ite
 UtilityCooldownViewer.itemFramePool.raiseTableAccess = nil
 activeEssential[1] = cdmItem
 
+-- Foreign hook installation is an error boundary: failed hooks do not escape or
+-- become false-positive registrations, and a later lifecycle pass retries them.
+local savedUtilityViewer = UtilityCooldownViewer
+local flakyViewer = NewViewer("FlakyUtilityViewer", {})
+flakyViewer.hookFailures = { OnAcquireItemFrame = 1 }
+UtilityCooldownViewer = flakyViewer
+assert(pcall(SDG.RescanButtons, SDG, false), "viewer hook failure escaped recovery")
+assert(not R.cdmViewerHooks[flakyViewer], "failed viewer hook was marked installed")
+SDG:RescanButtons(false)
+assert(R.cdmViewerHooks[flakyViewer], "viewer hook was not retried after failure")
+UtilityCooldownViewer = savedUtilityViewer
+
 -- Enabling CDM in combat must not enumerate pools or attach a newly observed item.
 assert(SDG:SetOption("cdm", false))
 local newItem = NewCDMItem("NewCDMItem", 47541)
+newItem.hookFailures = { SetCooldownID = 1 }
 activeEssential[1] = newItem
 local enumAtCombat = cdmEnumerations
 inCombat = true
@@ -411,10 +485,21 @@ assert(SDG:SetOption("cdm", true))
 assert(cdmEnumerations == enumAtCombat, "CDM pools enumerated in combat")
 assert(not R.cdmItemHooks[newItem], "new CDM item was hooked in combat")
 inCombat = false
+ActionButton1.slotReadCount = 0
+ActionButton2.slotReadCount = 0
 Fire("PLAYER_REGEN_ENABLED")
+assert(ActionButton1.slotReadCount == 0 and ActionButton2.slotReadCount == 0,
+    "combat exit duplicated assignment work before the queued settled rescan")
 Advance(0.2)
+assert(ActionButton1.slotReadCount > 0 and ActionButton2.slotReadCount > 0,
+    "settled post-combat rescan did not refresh assignments")
 assert(cdmEnumerations > enumAtCombat and R.cdmFrames[newItem] and R.cdmItemHooks[newItem],
     "post-combat CDM recovery did not attach the new item")
+assert(not R.cdmItemHooks[newItem].SetCooldownID,
+    "failed item hook was marked installed")
+SDG:RescanButtons(false)
+assert(R.cdmItemHooks[newItem].SetCooldownID,
+    "item hook was not retried after failure")
 
 -- Unsupported future schemas must refuse all spell-list commands explicitly.
 R.unsupportedSchema = true
@@ -454,6 +539,23 @@ enabledSetting:SetValue(true)
 assert(SuddenDoomGlowDB.enabled and R.runtimeRegistered,
     "direct addon setting did not restart the runtime")
 
+-- Runtime replacement learning is bounded independently of SavedVariables.
+-- Explicit signal aliases remain present when target variants consume the budget.
+local variantButton = NewFrame("VariantButton")
+for i = 1, 220 do
+    local slot = 1000 + i
+    actions[slot] = 800000 + i
+    variantButton.action = slot
+    actionCallbacks["ActionButton.OnActionChanged"].callback(nil, variantButton)
+end
+assert(#R.targetFamilyList <= 128, "resolved target family exceeded its runtime bound")
+assert(#R.signalFamilyList <= 128, "resolved signal family exceeded its runtime bound")
+assert(R.signalFamily[450932] and R.signalFamily[81340],
+    "configured signal aliases were displaced by learned target variants")
+assert(R.buttonSlots[variantButton] == 1220 and R.buttonsBySlot[1220][variantButton],
+    "button slot index did not retain the latest assignment")
+assert(not R.buttonsBySlot[1001], "button slot index retained an obsolete empty set")
+
 -- A full legacy list plus seeded defaults must still respect the hard bound.
 assert(SDG:SetOption("enabled", false))
 local legacyTargets, legacySignals = {}, {}
@@ -477,4 +579,4 @@ assert(#SuddenDoomGlowDB.targetSpellIDs == 32,
 assert(#SuddenDoomGlowDB.signalSpellIDs == 32,
     "legacy signal defaults exceeded the configured ID bound")
 
-print("runtime regression 1.4.4: PASS")
+print("runtime regression 1.4.5: PASS")
