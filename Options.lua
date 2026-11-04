@@ -1,6 +1,6 @@
 -- Sudden Doom Glow: native Blizzard Settings integration.
 
-local SDG = _G.SuddenDoomGlow
+local _addonName, SDG = ...
 if type(SDG) ~= "table" then return end
 
 local CATEGORY_NAME = "Sudden Doom Glow"
@@ -9,7 +9,6 @@ local registered = false
 local pendingRegistration = false
 local pendingOpen = false
 local deferFrame
-local writingSetting = false
 local notifyingSettings = false
 local unsupportedSchemaNoticeShown = false
 
@@ -59,25 +58,26 @@ local function DeferSettingsWork(openAfterward)
         "Settings registration deferred until combat ends.")
 end
 
-local function WriteOptionFromSetting(key, value)
-    writingSetting = true
-    local ok, result = pcall(SDG.SetOption, SDG, key, value)
-    writingSetting = false
-    if not ok then error(result) end
-    return result
+local function AttachChangeCallback(setting, key)
+    setting:SetValueChangedCallback(function(_setting, value)
+        if not SDG:ApplySettingOption(key, value) then
+            Print("Could not apply the updated setting.")
+        end
+    end)
 end
 
-local function RegisterBoolean(key, label, tooltip, defaultValue)
-    local setting = _G.Settings.RegisterProxySetting(
+local function RegisterBoolean(settings, variableTable, key, label, tooltip, defaultValue)
+    local setting = settings.RegisterAddOnSetting(
         category,
         SETTING_VARIABLES[key],
-        _G.Settings.VarType.Boolean,
+        key,
+        variableTable,
+        settings.VarType.Boolean,
         label,
-        defaultValue,
-        function() return SDG:GetOption(key) end,
-        function(value) WriteOptionFromSetting(key, value) end
+        defaultValue
     )
-    _G.Settings.CreateCheckbox(category, setting, tooltip)
+    AttachChangeCallback(setting, key)
+    settings.CreateCheckbox(category, setting, tooltip)
 end
 
 function SDG:RegisterSettings()
@@ -95,9 +95,10 @@ function SDG:RegisterSettings()
     end
 
     local settings = _G.Settings
-    if type(settings) ~= "table" or
+    local variableTable = _G.SuddenDoomGlowDB
+    if type(variableTable) ~= "table" or type(settings) ~= "table" or
        type(settings.RegisterVerticalLayoutCategory) ~= "function" or
-       type(settings.RegisterProxySetting) ~= "function" or
+       type(settings.RegisterAddOnSetting) ~= "function" or
        type(settings.CreateCheckbox) ~= "function" or
        type(settings.CreateSlider) ~= "function" or
        type(settings.CreateSliderOptions) ~= "function" or
@@ -108,22 +109,24 @@ function SDG:RegisterSettings()
 
     category = settings.RegisterVerticalLayoutCategory(CATEGORY_NAME)
 
-    RegisterBoolean("enabled", "Enable glow",
+    RegisterBoolean(settings, variableTable, "enabled", "Enable glow",
         "Show the addon glow while Sudden Doom is active.", true)
-    RegisterBoolean("cdm", "Cooldown Viewer glow",
+    RegisterBoolean(settings, variableTable, "cdm", "Cooldown Viewer glow",
         "Mirror the glow on matching Cooldown Viewer items.", true)
-    RegisterBoolean("debug", "Debug log",
+    RegisterBoolean(settings, variableTable, "debug", "Debug log",
         "Show diagnostic messages in the debug window.", false)
 
-    local scaleSetting = settings.RegisterProxySetting(
+    local scaleSetting = settings.RegisterAddOnSetting(
         category,
         SETTING_VARIABLES.glowScale,
+        "glowScale",
+        variableTable,
         settings.VarType.Number,
         "Glow size",
-        1.4,
-        function() return SDG:GetOption("glowScale") end,
-        function(value) WriteOptionFromSetting("glowScale", value) end
+        1.4
     )
+    AttachChangeCallback(scaleSetting, "glowScale")
+
     local scaleOptions = settings.CreateSliderOptions(1.0, 1.8, 0.1)
     local sliderLabel = _G.MinimalSliderWithSteppersMixin and
         _G.MinimalSliderWithSteppersMixin.Label and
@@ -142,16 +145,17 @@ function SDG:RegisterSettings()
 end
 
 function SDG:NotifySettingsChanged(key)
-    if not registered or writingSetting or notifyingSettings then return end
+    if not registered or notifyingSettings then return false end
     local variable = SETTING_VARIABLES[key]
-    if not variable then return end
+    if not variable then return false end
     local settings = _G.Settings
-    if type(settings) ~= "table" or type(settings.NotifyUpdate) ~= "function" then return end
+    if type(settings) ~= "table" or type(settings.NotifyUpdate) ~= "function" then return false end
 
     notifyingSettings = true
     local ok = pcall(settings.NotifyUpdate, variable)
     notifyingSettings = false
     if not ok then Print("Could not refresh the Settings control.") end
+    return ok
 end
 
 function SDG:OpenSettings()
@@ -167,7 +171,3 @@ function SDG:OpenSettings()
     _G.Settings.OpenToCategory(category:GetID())
     return true
 end
-
--- This nonvisual event owner may be created during a late combat-time load;
--- settings category registration/opening remains deferred until combat ends.
-EnsureDeferredWorkFrame()

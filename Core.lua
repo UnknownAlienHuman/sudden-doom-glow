@@ -1,13 +1,9 @@
 -- Sudden Doom Glow
 -- Retail 12.1.5: official Spell Activation Overlay state -> addon-owned glow surfaces.
 
-local ADDON_NAME = ... or "SuddenDoomGlow"
-
-local SDG = _G.SuddenDoomGlow
-if type(SDG) ~= "table" then
-    SDG = {}
-    _G.SuddenDoomGlow = SDG
-end
+local ADDON_NAME, SDG = ...
+ADDON_NAME = type(ADDON_NAME) == "string" and ADDON_NAME or "SuddenDoomGlow"
+if type(SDG) ~= "table" then SDG = {} end
 
 local CreateFrame = _G.CreateFrame
 local InCombatLockdown = _G.InCombatLockdown
@@ -27,7 +23,8 @@ local canaccessvalue = _G.canaccessvalue
 local canaccesstable = _G.canaccesstable
 local issecretvalue = _G.issecretvalue
 
-local CURRENT_SCHEMA = 4
+local CURRENT_SCHEMA = 5
+local MAX_CONFIGURED_SPELL_IDS = 32
 local RESCAN_DELAY = 0.08
 local OVERLAY_RECONCILE_DELAY = 0.06
 local OVERLAY_SHOW_GRACE = 0.20
@@ -91,6 +88,7 @@ local R = {
 
     actionCallbackAttached = false,
     actionCallbackOwner = {},
+    appliedOptions = {},
 }
 SDG.runtime = R
 
@@ -113,8 +111,14 @@ end
 -- Gate values before nil checks, comparison, conversion, formatting or logging.
 -- pcall remains an error boundary; it never grants access or declassifies data.
 local function IsAccessible(value)
-    if type(issecretvalue) == "function" and issecretvalue(value) then return false end
-    if type(canaccessvalue) == "function" then return canaccessvalue(value) end
+    if type(canaccessvalue) == "function" then
+        local ok, accessible = pcall(canaccessvalue, value)
+        return ok and accessible and true or false
+    end
+    if type(issecretvalue) == "function" then
+        local ok, secret = pcall(issecretvalue, value)
+        return ok and not secret
+    end
     return true
 end
 
@@ -271,8 +275,9 @@ local function CopyNumericList(source)
     if type(source) ~= "table" then return result end
 
     for i = 1, #source do
+        if #result >= MAX_CONFIGURED_SPELL_IDS then break end
         local id = SafeID(source[i])
-        if id and id > 0 and not seen[id] then
+        if id and not seen[id] then
             seen[id] = true
             result[#result + 1] = id
         end
@@ -400,7 +405,7 @@ local function RebuildSpellFamilies()
     ClearMap(R.signalFamily)
     ClearArray(R.signalFamilyList)
 
-    for i = 1, #DB.targetSpellIDs do
+    for i = 1, math.min(#DB.targetSpellIDs, MAX_CONFIGURED_SPELL_IDS) do
         local configuredID = SafeID(DB.targetSpellIDs[i])
         if configuredID then
             local baseID = GetBaseSpellID(configuredID) or configuredID
@@ -419,7 +424,7 @@ local function RebuildSpellFamilies()
     for i = 1, #R.targetFamilyList do
         AddUniqueID(R.signalFamily, R.signalFamilyList, R.targetFamilyList[i])
     end
-    for i = 1, #DB.signalSpellIDs do
+    for i = 1, math.min(#DB.signalSpellIDs, MAX_CONFIGURED_SPELL_IDS) do
         AddUniqueID(R.signalFamily, R.signalFamilyList, DB.signalSpellIDs[i])
     end
     if R.lastQuerySpellID and not R.signalFamily[R.lastQuerySpellID] then
@@ -471,7 +476,6 @@ local function LearnExplicitOverride(baseSpellID, overrideSpellID, source)
     if not overrideSpellID then
         if R.explicitOverrides[normalizedBase] then
             R.explicitOverrides[normalizedBase] = nil
-            RebuildSpellFamilies()
             Log("Override removed for " .. tostring(normalizedBase) .. " (" .. tostring(source) .. ")")
             return true, true
         end
@@ -483,7 +487,6 @@ local function LearnExplicitOverride(baseSpellID, overrideSpellID, source)
     end
 
     R.explicitOverrides[normalizedBase] = overrideSpellID
-    RebuildSpellFamilies()
     Log(("Override %d -> %d (%s)"):format(normalizedBase, overrideSpellID, tostring(source)))
     return true, true
 end
@@ -544,10 +547,12 @@ local function GetButtonSlot(button)
             return actionType == "action" and SafeID(value) or nil
         end
     end
-    if not IsAccessible(button.action) then return nil end
-    if button.action ~= nil then return SafeID(button.action) end
-    if not IsAccessible(button._state_action) then return nil end
-    if button._state_action ~= nil then return SafeID(button._state_action) end
+    local action = button.action
+    if not IsAccessible(action) then return nil end
+    if action ~= nil then return SafeID(action) end
+    local stateAction = button._state_action
+    if not IsAccessible(stateAction) then return nil end
+    if stateAction ~= nil then return SafeID(stateAction) end
     if type(button.GetAttribute) == "function" then
         local ok, value = pcall(button.GetAttribute, button, "action")
         if ok then return SafeID(value) end
@@ -575,18 +580,28 @@ end
 local function GetFrameState(frame)
     local state = R.frameState[frame]
     if not state then
-        state = { alert = nil, shown = false, animating = false, renderTarget = nil, isCDM = false }
+        state = { alert = nil, shown = false, animating = false, geometryReady = false, renderTarget = nil, isCDM = false }
         R.frameState[frame] = state
     end
     return state
 end
 
 local function RefreshAlertGeometry(frame, state)
-    if InCombat() or not FrameCanBeUsed(state.alert) then return end
+    if InCombat() then R.needsGeometry = true; return state.geometryReady end
+    if not FrameCanBeUsed(state.alert) then R.needsGeometry = true; return state.geometryReady end
     local target = GetRenderTarget(frame)
-    if not target then return end
+    if not target then
+        state.geometryReady = false
+        R.needsGeometry = true
+        return false
+    end
+
     if state.renderTarget ~= target and type(state.alert.SetParent) == "function" then
-        state.alert:SetParent(target)
+        if not pcall(state.alert.SetParent, state.alert, target) then
+            state.geometryReady = false
+            R.needsGeometry = true
+            return false
+        end
     end
 
     local width, height = 0, 0
@@ -598,12 +613,17 @@ local function RefreshAlertGeometry(frame, state)
         end
     end
 
-    pcall(state.alert.ClearAllPoints, state.alert)
+    local geometryOK = pcall(state.alert.ClearAllPoints, state.alert)
     if width > 0 and height > 0 then
-        pcall(state.alert.SetSize, state.alert, width * DB.glowScale, height * DB.glowScale)
-        pcall(state.alert.SetPoint, state.alert, "CENTER", target, "CENTER", 0, 0)
+        geometryOK = pcall(state.alert.SetSize, state.alert, width * DB.glowScale, height * DB.glowScale) and geometryOK
+        geometryOK = pcall(state.alert.SetPoint, state.alert, "CENTER", target, "CENTER", 0, 0) and geometryOK
     else
-        pcall(state.alert.SetAllPoints, state.alert, target)
+        geometryOK = pcall(state.alert.SetAllPoints, state.alert, target) and geometryOK
+    end
+    if not geometryOK then
+        state.geometryReady = false
+        R.needsGeometry = true
+        return false
     end
 
     if type(target.GetFrameLevel) == "function" and type(state.alert.SetFrameLevel) == "function" then
@@ -613,12 +633,18 @@ local function RefreshAlertGeometry(frame, state)
     end
 
     state.renderTarget = target
+    state.geometryReady = true
+    return true
 end
 
 local function EnsureAlert(frame)
     if not FrameCanBeUsed(frame) then return nil end
     local state = GetFrameState(frame)
-    if state.alert then return FrameCanBeUsed(state.alert) and state.alert or nil end
+    if state.alert then
+        if not FrameCanBeUsed(state.alert) then return nil end
+        if not state.geometryReady and not RefreshAlertGeometry(frame, state) then return nil end
+        return state.alert
+    end
     if InCombat() then R.needsRescan = true; return nil end
     if type(CreateFrame) ~= "function" then return nil end
 
@@ -634,16 +660,16 @@ local function EnsureAlert(frame)
     state.renderTarget = target
     state.shown = false
     state.animating = false
+    state.geometryReady = false
     pcall(alert.Hide, alert)
-    RefreshAlertGeometry(frame, state)
+    local geometryReady = RefreshAlertGeometry(frame, state)
     if type(target.HookScript) == "function" then
-        target:HookScript("OnSizeChanged", function()
+        pcall(target.HookScript, target, "OnSizeChanged", function()
             if not RuntimeEnabled() then return end
-            if InCombat() then R.needsGeometry = true
-            else RefreshAlertGeometry(frame, state) end
+            RefreshAlertGeometry(frame, state)
         end)
     end
-    return alert
+    return geometryReady and alert or nil
 end
 
 local function StopAnimation(animation)
@@ -1109,21 +1135,22 @@ end
 
 local function PrimeTrackedAlerts()
     if InCombat() then R.needsGeometry = true; return end
+    local complete = true
     for button in pairs(R.knownButtons) do
         if IsAccessible(button) then
-            if R.trackedButtons[button] then EnsureAlert(button) end
+            if R.trackedButtons[button] and not EnsureAlert(button) then complete = false end
             local state = R.frameState[button]
-            if state then RefreshAlertGeometry(button, state) end
+            if state and not RefreshAlertGeometry(button, state) then complete = false end
         end
     end
     for item in pairs(R.cdmFrames) do
         if IsAccessible(item) then
-            EnsureAlert(item)
+            if not EnsureAlert(item) then complete = false end
             local state = R.frameState[item]
-            if state then RefreshAlertGeometry(item, state) end
+            if state and not RefreshAlertGeometry(item, state) then complete = false end
         end
     end
-    R.needsGeometry = false
+    R.needsGeometry = not complete
 end
 
 local function RefreshKnownButtons(changedSlot)
@@ -1186,6 +1213,21 @@ function SDG:RequestRescan(reason, deep)
     return R.timers.rescan ~= nil
 end
 
+local function QueueMappingRecovery(reason, clearOverrides)
+    if clearOverrides then ClearMap(R.explicitOverrides) end
+    if InCombat() then
+        -- Mapping identity may change during combat even though structural work
+        -- cannot. Refresh already-observed assignments now and keep one complete
+        -- recovery pass for combat exit.
+        RebuildSpellFamilies()
+        RefreshAssignments()
+        ReconcileGlow(reason)
+        R.needsRescan = true
+        return
+    end
+    SDG:RequestRescan(reason, false)
+end
+
 local function AttachActionButtonCallback()
     if R.actionCallbackAttached or not EventRegistry or type(EventRegistry.RegisterCallback) ~= "function" then return end
     EventRegistry:RegisterCallback("ActionButton.OnActionChanged", function(_, button)
@@ -1211,7 +1253,7 @@ local RUNTIME_EVENTS = {
 }
 
 local RELEVANT_ADDONS = {
-    Blizzard_ActionBar = true,
+    Blizzard_CooldownViewer = true,
     Bartender4 = true,
     Dominos = true,
     ElvUI = true,
@@ -1261,10 +1303,68 @@ local function StartRuntime()
     ReconcileGlow("enabled")
 end
 
+local function NormalizeOptionValue(key, value)
+    if not IsAccessible(value) then return nil, false end
+    if key == "glowScale" then
+        value = SafeNumber(value)
+        if not value then return nil, false end
+        return math.max(1, math.min(1.8, value)), true
+    end
+    if key == "enabled" or key == "cdm" or key == "debug" then
+        if type(value) ~= "boolean" then return nil, false end
+        return value, true
+    end
+    return nil, false
+end
+
+local function ApplyOptionEffects(key, value)
+    if R.appliedOptions[key] == value then return false end
+    R.appliedOptions[key] = value
+
+    if key == "enabled" then
+        if value then StartRuntime() else StopRuntime() end
+    elseif key == "cdm" then
+        ReconcileCDMFrames()
+    elseif key == "glowScale" then
+        if RuntimeEnabled() then PrimeTrackedAlerts() end
+    elseif key == "debug" and SDG.DebugUI then
+        if value then SDG.DebugUI:Show() else SDG.DebugUI:Hide() end
+    end
+    return true
+end
+
+local function RememberAppliedOptions()
+    R.appliedOptions.enabled = DB.enabled
+    R.appliedOptions.cdm = DB.cdm
+    R.appliedOptions.debug = DB.debug
+    R.appliedOptions.glowScale = DB.glowScale
+end
+
 function SDG:GetOption(key)
     if key == "enabled" or key == "cdm" or key == "debug" or key == "glowScale" then
         return DB and DB[key]
     end
+end
+
+-- Settings.RegisterAddOnSetting writes the SavedVariables field before its
+-- callback. Normalize that stored value, then run the same idempotent effects
+-- used by slash/API changes.
+function SDG:ApplySettingOption(key, value)
+    if not DB or R.unsupportedSchema then return false end
+    local normalized, valid = NormalizeOptionValue(key, value)
+    if not valid then
+        local previous = R.appliedOptions[key]
+        if previous ~= nil then DB[key] = previous end
+        return false
+    end
+
+    local corrected = DB[key] ~= normalized
+    DB[key] = normalized
+    ApplyOptionEffects(key, normalized)
+    if corrected and type(self.NotifySettingsChanged) == "function" then
+        self:NotifySettingsChanged(key)
+    end
+    return true
 end
 
 function SDG:SetOption(key, value)
@@ -1273,27 +1373,13 @@ function SDG:SetOption(key, value)
         Print("Update Sudden Doom Glow to edit settings saved by a newer version.")
         return false
     end
-    if not IsAccessible(value) then return false end
-    if key == "glowScale" then
-        value = SafeNumber(value)
-        if not value then return false end
-        value = math.max(1, math.min(1.8, value))
-    elseif key == "enabled" or key == "cdm" or key == "debug" then
-        if type(value) ~= "boolean" then return false end
-    else
-        return false
-    end
-    if DB[key] == value then return true end
-    DB[key] = value
-    if key == "enabled" then
-        if value then StartRuntime() else StopRuntime() end
-    elseif key == "cdm" then
-        ReconcileCDMFrames()
-    elseif key == "glowScale" then
-        if RuntimeEnabled() then PrimeTrackedAlerts() end
-    elseif key == "debug" and self.DebugUI then
-        if value then self.DebugUI:Show() else self.DebugUI:Hide() end
-    end
+
+    local normalized, valid = NormalizeOptionValue(key, value)
+    if not valid then return false end
+    if DB[key] == normalized and R.appliedOptions[key] == normalized then return true end
+
+    DB[key] = normalized
+    ApplyOptionEffects(key, normalized)
     if type(self.NotifySettingsChanged) == "function" then self:NotifySettingsChanged(key) end
     return true
 end
@@ -1316,6 +1402,7 @@ function SDG:OnLogin()
     local _, class = UnitClass("player")
     R.class = SafeString(class)
     InitializeDB()
+    RememberAppliedOptions()
     if type(self.RegisterSettings) == "function" then self:RegisterSettings() end
     if not RuntimeEnabled() then
         RebuildSpellFamilies()
@@ -1339,12 +1426,8 @@ local function OnEvent(_, event, ...)
     elseif event == "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED" then
         local baseSpellID, overrideSpellID = ...
         local changed, relevant = LearnExplicitOverride(baseSpellID, overrideSpellID, event)
-        if not relevant then return end
-        if changed then
-            RefreshAssignments()
-            SDG:RequestRescan(event, false)
-        end
-        ReconcileGlow(event)
+        if not relevant or not changed then return end
+        QueueMappingRecovery(event, false)
     elseif event == "PLAYER_REGEN_ENABLED" then
         RefreshAssignments()
         if R.needsGeometry then PrimeTrackedAlerts() end
@@ -1368,20 +1451,13 @@ local function OnEvent(_, event, ...)
         SDG:RequestRescan(event, false)
     elseif event == "COOLDOWN_VIEWER_TABLE_HOTFIXED" then
         -- Static viewer data changed, but runtime override observations and proc
-        -- evidence remain valid until their own authoritative events replace them.
-        RebuildSpellFamilies()
-        RefreshAssignments()
-        SDG:RequestRescan(event, false)
-        ReconcileGlow(event)
+        -- evidence remain valid. Outside combat, bursts collapse into one pass.
+        QueueMappingRecovery(event, false)
     elseif event == "PLAYER_TALENT_UPDATE" or event == "TRAIT_CONFIG_UPDATED" or
            event == "SPELLS_CHANGED" then
-        -- These events invalidate spell/assignment relationships, not proc state.
-        -- Drop stale override observations and preserve animation continuity.
-        ClearMap(R.explicitOverrides)
-        RebuildSpellFamilies()
-        RefreshAssignments()
-        SDG:RequestRescan(event, false)
-        ReconcileGlow(event)
+        -- Drop stale override observations. Outside combat, bursty invalidations
+        -- collapse into one settled pass; combat reuses only existing surfaces.
+        QueueMappingRecovery(event, true)
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" or event == "SPELL_SECRECY_CHANGED" then
         if event == "PLAYER_SPECIALIZATION_CHANGED" then
             local unit = ...
@@ -1429,6 +1505,7 @@ local function DumpStatus()
     Print(("buttons=%d cdm=%d query=%d/%d authoritative=%s eventSignals=%d")
         :format(CountEntries(R.trackedButtons), CountEntries(R.cdmFrames), R.overlayQueryReadable,
             R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountEntries(R.eventSignals)))
+    Print(("configured ID limit: %d per list"):format(MAX_CONFIGURED_SPELL_IDS))
     Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
     Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
     Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
@@ -1449,13 +1526,20 @@ local function ToggleID(list, value, label)
             break
         end
     end
-    if added then list[#list + 1] = id end
+    if added then
+        if #list >= MAX_CONFIGURED_SPELL_IDS then
+            Print(("Maximum %d configured %s IDs reached."):format(MAX_CONFIGURED_SPELL_IDS, label))
+            return false
+        end
+        list[#list + 1] = id
+    end
     RebuildSpellFamilies()
     RefreshAssignments()
     local reason = label .. (added and "-added" or "-removed")
     SDG:RequestRescan(reason, false)
     ReconcileGlow(reason)
     Print((added and "Added " or "Removed ") .. label .. " spellID " .. tostring(id))
+    return true
 end
 
 

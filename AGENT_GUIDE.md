@@ -1,51 +1,50 @@
-# Sudden Doom Glow agent guide
+# Sudden Doom Glow engineering guide
 
 ## Target and evidence
 
-- Release: `1.4.2`
-- Target: Retail `12.1.5`; TOC interface `120105` is expected metadata until captured from `GetBuildInfo()`.
-- Knowledge-base policy: `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`.
-- KB selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`.
-- Current live source recheck: `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`, checked `2026-11-03`. The complete `70688 → 70783` delta does not touch the ActionBar, Spell Activation Overlay, alert-template, or Cooldown Viewer files used by this addon.
-- Live client combat, taint, rendering, and performance: **NOT-RUN**.
+- Release: `1.4.3`
+- Target: Retail `12.1.5`; expected TOC interface `120105`
+- Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`
+- KB-selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
+- Current live-source recheck: `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`, checked `2026-11-04`
+- Named-client combat, taint, rendering, and performance: **NOT-RUN**
 
-Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, then the relevant code. Read both test files before changing their contracts.
+Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, and both runtime tests before changing behavior.
 
 ## Invariants
 
-- Overlay SHOW/HIDE events are low-latency wake-ups. `C_SpellActivationOverlay.IsSpellOverlayed` is authoritative when the complete candidate family is readable.
-- Any readable `true` may enable the glow. OFF is authoritative only when every configured candidate is readable and false.
-- Keep event signals independent by spell ID. Unknown or unreadable payloads may wake a query but are not direct proc evidence.
+- Spell Activation Overlay events are wake-ups; `C_SpellActivationOverlay.IsSpellOverlayed` is state authority when the complete candidate set is readable.
+- Any readable `true` enables the glow. OFF requires every configured candidate to be readable and false.
 - Never reconstruct Sudden Doom from auras, combat log, resources, cooldowns, usability, animation, visibility, errors, or timing.
-- Gate secret-capable values before nil checks, comparison, conversion, formatting, logging, indexing, keys, persistence, or deferred capture.
-- Check `CanBeAccessedInContext()` immediately before other script-object probes or mutations. Never cache access permission.
-- Revalidate the current button assignment before every show. `C_ActionBar.GetSpell` is primary; resolved `GetActionInfo`/`GetMacroSpell` is the fallback. Never parse macro text.
-- Action assignment events update assignments only; they do not become proc-state wake-ups.
-- Keep one weak set of known buttons and one weak set of current matches. Structural work is deferred out of combat.
-- Cooldown Viewer integration is source-coupled: use public data-ready as a wake-up, hook actual instances once, use configured `GetBaseSpellID`, enumerate pools only at setup/recovery, gate external pool tables, and never prune from partial viewer evidence.
-- In combat, reuse only already observed Cooldown Viewer instances and existing addon-owned alerts. Defer new hooks, pool enumeration, and alert construction.
-- Cooldown Viewer hotfix and talent/spell invalidations change assignment data, not proc state. Drop stale override observations while preserving overlay evidence and animation continuity.
-- Cached positive query evidence remains valid only while its spell ID stays configured and only for the bounded fallback lifetime.
-- Recover owned pending hides and missed animation starts on authoritative lifecycle events without polling.
-- Future SavedVariables schemas remain untouched and inactive; every mutating command reports refusal.
+- Gate secret-capable values before nil/type checks, comparison, conversion, formatting, keys, storage, logging, or deferral.
+- Recheck current object access immediately before mutation; never cache permission.
+- Revalidate the current action assignment before every show. Use `C_ActionBar.GetSpell`, then only the resolved `GetActionInfo`/`GetMacroSpell` fallback. Never parse macro text.
+- Assignment events update assignments only. They do not become proc-state signals.
+- Keep structural work out of combat. Reuse only known buttons, observed Cooldown Viewer items, and existing addon-owned alerts during lockdown.
+- Cooldown Viewer integration is source-coupled: public readiness event, actual-instance post-hooks, configured `GetBaseSpellID`, bounded recovery enumeration, and no pruning from partial evidence.
+- Hotfix/talent/spell invalidations rebuild mapping identity without inventing a proc edge or restarting a valid animation.
+- Settings are ordinary SavedVariables fields registered through `Settings.RegisterAddOnSetting`; migration and runtime side effects remain addon-owned.
+- Target and signal lists are capped at 32 IDs each. Work must remain bounded.
+- Future SavedVariables schemas remain untouched and inactive.
+- The addon table passed as the second TOC vararg is the only shared Lua namespace. Do not restore `_G.SuddenDoomGlow`.
 
-## Change routing
+## Ownership
 
-- Runtime state, migrations, action mapping, overlay arbitration, rendering, and Cooldown Viewer adapter: `Core.lua`.
-- Settings registration and combat deferral: `Options.lua`.
-- Diagnostic log/window: `Debug.lua`.
-- Source pins and implementation limits: `docs/API_CONTRACTS.md`.
-- Live evidence: `VALIDATION.md` and `docs/LIVE_TEST_CHECKLIST.md`.
-- Deterministic archive: `scripts/package.py`.
+- `Core.lua`: persistence, spell families, action mapping, overlay arbitration, rendering, Cooldown Viewer adapter.
+- `Options.lua`: Blizzard Settings registration and combat deferral.
+- `Debug.lua`: bounded diagnostic log/window.
+- `docs/API_CONTRACTS.md`: source pins and private/public boundaries.
+- `VALIDATION.md`: executed checks and remaining uncertainty.
+- `scripts/package.py`: deterministic allowlisted release archive.
 
 ## Checks
 
 ```bash
-python tests/static_checks.py .
-luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression_1_4_2.lua
-lua tests/runtime_smoke.lua Core.lua
-lua tests/runtime_regression_1_4_2.lua Core.lua
-python scripts/package.py
+python3 tests/static_checks.py .
+luac5.1 -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression.lua
+lua5.1 tests/runtime_smoke.lua Core.lua
+lua5.1 tests/runtime_regression.lua Core.lua
+python3 scripts/package.py
 ```
 
-The archive contains one top-level `SuddenDoomGlow/` directory and only the packager allowlist. Stub checks do not prove live-client behavior.
+Stub checks are host evidence, not a live-client pass.

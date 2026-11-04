@@ -3,13 +3,13 @@
 Run from the repository root:
 
 ```bash
-python tests/static_checks.py .
-luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression_1_4_2.lua
-lua tests/runtime_smoke.lua Core.lua
-lua tests/runtime_regression_1_4_2.lua Core.lua
-python scripts/package.py
+python3 tests/static_checks.py .
+luac5.1 -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression.lua
+lua5.1 tests/runtime_smoke.lua Core.lua
+lua5.1 tests/runtime_regression.lua Core.lua
+python3 scripts/package.py
 ```
 
-`runtime_smoke.lua` retains the broad 1.4.x stub matrix. `runtime_regression_1_4_2.lua` focuses on the third audit: filtered addon readiness, action/irrelevant-override query separation, CDM and talent/spell continuity, stale-override removal, animation recovery, external-table gates, conservative partial-viewer pruning, combat-deferred CDM setup, future-schema command refusal, diagnostic access gates, and accurate rescan status.
+`runtime_smoke.lua` retains the broad lifecycle matrix. `runtime_regression.lua` focuses on assignment/proc separation, coalesced mapping invalidation, Cooldown Viewer readiness and partial evidence, combat structural deferral, inaccessible object recovery, native AddOnSetting behavior, bounded configured lists, future-schema refusal, and lazy optional UI owners.
 
-These tests use deterministic stubs. They do not establish live Retail behavior, taint safety, visual quality, hotfixed event payloads, or measured performance. Record those separately in `VALIDATION.md`.
+These are deterministic host tests. They do not establish live Retail behavior, taint safety, visual quality, hotfixed payloads, or measured performance.

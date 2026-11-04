@@ -140,7 +140,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.2" or nil end }
+C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.3" or nil end }
 local currentOverrideSpellID = 1242174
 C_Spell = {
     GetBaseSpell = function(spellID)
@@ -223,22 +223,40 @@ ActionButton2.action = 2
 
 Settings = { VarType = { Boolean = "boolean", Number = "number" } }
 local settingsCategory = { GetID = function() return 321 end }
+local registeredSettings = {}
 function Settings.RegisterVerticalLayoutCategory() return settingsCategory end
-function Settings.RegisterProxySetting(_category, _variable, _kind, _label, _default, getter, setter)
-    return { get = getter, set = setter }
+function Settings.RegisterAddOnSetting(_category, variable, key, variableTable, kind, label, defaultValue)
+    if variableTable[key] == nil then variableTable[key] = defaultValue end
+    local setting = {
+        variable = variable, key = key, variableTable = variableTable,
+        kind = kind, label = label,
+    }
+    function setting:SetValueChangedCallback(callback) self.callback = callback end
+    function setting:GetValue() return self.variableTable[self.key] end
+    function setting:SetValue(value)
+        assert(type(value) == self.kind)
+        self.variableTable[self.key] = value
+        if self.callback then self.callback(self, value) end
+    end
+    registeredSettings[variable] = setting
+    return setting
 end
 function Settings.CreateCheckbox() end
 function Settings.CreateSliderOptions() return {} end
 function Settings.CreateSlider() end
 function Settings.RegisterAddOnCategory() end
-function Settings.NotifyUpdate() end
+function Settings.NotifyUpdate(variable)
+    local setting = registeredSettings[variable]
+    if setting and setting.callback then setting.callback(setting, setting:GetValue()) end
+end
 function Settings.OpenToCategory() end
 
 SuddenDoomGlowDB = { enabled = true, debug = false, cdm = true }
+local addon = {}
 
-assert(loadfile(corePath))("SuddenDoomGlow")
+assert(loadfile(corePath))("SuddenDoomGlow", addon)
 Advance(0)
-local SDG = assert(SuddenDoomGlow)
+local SDG = addon
 local R = assert(SDG.runtime)
 local eventFrame = assert(createdFrames[1])
 local function Fire(event, ...)
@@ -300,7 +318,7 @@ assert(R.glowActive and actionState.shown, "precondition: proc glow did not star
 local showCount, hideCount = actionAlert.showCount, actionAlert.hideCount
 local playCount = actionAlert.ProcStartAnim.playCount + actionAlert.ProcLoop.playCount
 Fire("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED", 47541, 777001)
-assert(R.targetFamily[777001], "precondition: explicit override was not learned")
+assert(R.explicitOverrides[47541] == 777001, "explicit override event was not retained")
 Fire("COOLDOWN_VIEWER_TABLE_HOTFIXED")
 Advance(0.2)
 assert(R.glowActive and actionState.shown, "CDM hotfix cleared active proc state")
@@ -314,10 +332,13 @@ assert(actionAlert.ProcStartAnim.playCount + actionAlert.ProcLoop.playCount == p
 currentOverrideSpellID = 1242174
 showCount, hideCount = actionAlert.showCount, actionAlert.hideCount
 playCount = actionAlert.ProcStartAnim.playCount + actionAlert.ProcLoop.playCount
+queryCalls = 0
 Fire("PLAYER_TALENT_UPDATE")
 Fire("TRAIT_CONFIG_UPDATED")
 Fire("SPELLS_CHANGED")
+assert(queryCalls == 0, "mapping invalidations queried before the coalesced recovery pass")
 Advance(0.2)
+assert(queryCalls == 1, "mapping invalidation burst did not collapse into one proc query")
 assert(R.glowActive and actionState.shown, "mapping invalidation cleared active proc state")
 assert(not R.targetFamily[777001] and R.targetFamily[1242174],
     "mapping invalidation retained a stale explicit override")
@@ -400,9 +421,21 @@ assert(SDG:SetOption("enabled", true))
 
 -- Optional UI owners attach once and ordinary registration remains usable.
 local frameCount = #createdFrames
-assert(loadfile(coreDir .. "Debug.lua"))("SuddenDoomGlow")
-assert(loadfile(coreDir .. "Options.lua"))("SuddenDoomGlow")
-assert(#createdFrames == frameCount + 2, "optional UI event owners did not attach exactly once")
+assert(loadfile(coreDir .. "Debug.lua"))("SuddenDoomGlow", addon)
+assert(loadfile(coreDir .. "Options.lua"))("SuddenDoomGlow", addon)
+assert(#createdFrames == frameCount, "optional UI modules created idle event-owner frames")
 assert(SDG:RegisterSettings(), "Settings registration failed")
+assert(registeredSettings.SuddenDoomGlow_Enabled and registeredSettings.SuddenDoomGlow_CooldownViewer
+    and registeredSettings.SuddenDoomGlow_Debug and registeredSettings.SuddenDoomGlow_GlowScale,
+    "ordinary SavedVariables fields were not registered as addon settings")
+assert(not Settings.RegisterProxySetting, "test unexpectedly retained proxy setting support")
 
-print("runtime regression 1.4.2: PASS")
+local enabledSetting = registeredSettings.SuddenDoomGlow_Enabled
+enabledSetting:SetValue(false)
+assert(not SuddenDoomGlowDB.enabled and not R.runtimeRegistered,
+    "direct addon setting did not stop the runtime")
+enabledSetting:SetValue(true)
+assert(SuddenDoomGlowDB.enabled and R.runtimeRegistered,
+    "direct addon setting did not restart the runtime")
+
+print("runtime regression 1.4.3: PASS")

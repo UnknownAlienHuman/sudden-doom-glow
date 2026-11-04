@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.3 — 2026-11-04
+
+- Replace proxy settings with native `RegisterAddOnSetting` ownership for ordinary SavedVariables fields; keep migration, normalization, and idempotent runtime effects in the addon.
+- Remove the accidental global addon namespace and compose files through the shared second TOC vararg table.
+- Create Settings/debug deferred event owners only when combat actually blocks a requested operation.
+- Bound target and signal configuration to 32 IDs each, preventing unbounded SavedVariables and overlay-query amplification.
+- Coalesce Cooldown Viewer override/hotfix and talent/spell mapping bursts; duplicate or irrelevant override events now do no work.
+- Track geometry readiness separately, retry failed parenting/anchoring safely, and avoid marking failed structural work complete.
+- Harden value gates with fail-closed access checks and avoid repeated reads of secret-capable assignment fields.
+- Remove obsolete redirect/release documents; `ARCHITECTURE.md`, `CHANGELOG.md`, and `VALIDATION.md` are the maintained owners.
+- Exact Lua 5.1 syntax, broad smoke, focused regression, static checks, deterministic package, safe extraction, and source/package parity pass. Live-client validation remains **NOT-RUN**.
+
 ## 1.4.2 — 2026-11-03
 
 - Recheck the complete live-source transition from `12.1.5.70688` to `12.1.5.70783`; the addon-owned ActionBar, Spell Activation Overlay, alert-template, and Cooldown Viewer source slices are unchanged.

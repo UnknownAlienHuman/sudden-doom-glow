@@ -142,6 +142,7 @@ function UnitClass()
 end
 function IsLoggedIn() return isLoggedIn end
 function canaccessvalue(value) return value ~= secretValue end
+function canaccesstable(value) return value.tableAccessible ~= false end
 function issecretvalue(value) return value == secretValue end
 function ActionButton_GetPagedID(button) return button.pagedAction or button.action end
 
@@ -149,17 +150,25 @@ DEFAULT_CHAT_FRAME = { AddMessage = function(_, message) messages[#messages + 1]
 SlashCmdList = {}
 
 local settingsRegistered = {}
-local proxyRegistrationCalls = 0
+local addonSettingRegistrationCalls = 0
 local settingsCategory = { GetID = function() return 321 end }
 Settings = { VarType = { Boolean = "boolean", Number = "number" } }
 function Settings.RegisterVerticalLayoutCategory(name)
     assert(name == "Sudden Doom Glow")
     return settingsCategory
 end
-function Settings.RegisterProxySetting(category, variable, valueType, label, defaultValue, getter, setter)
-    proxyRegistrationCalls = proxyRegistrationCalls + 1
-    local setting = { category = category, variable = variable, valueType = valueType,
-        label = label, defaultValue = defaultValue, get = getter, set = setter }
+function Settings.RegisterAddOnSetting(category, variable, key, variableTable, valueType, label, defaultValue)
+    addonSettingRegistrationCalls = addonSettingRegistrationCalls + 1
+    if variableTable[key] == nil then variableTable[key] = defaultValue end
+    local setting = { category = category, variable = variable, key = key, variableTable = variableTable,
+        valueType = valueType, label = label, defaultValue = defaultValue }
+    function setting:SetValueChangedCallback(callback) self.callback = callback end
+    function setting:GetValue() return self.variableTable[self.key] end
+    function setting:SetValue(value)
+        assert(type(value) == self.valueType)
+        self.variableTable[self.key] = value
+        if self.callback then self.callback(self, value) end
+    end
     settingsRegistered[variable] = setting
     return setting
 end
@@ -174,7 +183,10 @@ function Settings.CreateSlider(category, setting, options, tooltip)
     assert(category == settingsCategory and setting and options and tooltip)
 end
 function Settings.RegisterAddOnCategory(category) assert(category == settingsCategory) end
-function Settings.NotifyUpdate(variable) assert(settingsRegistered[variable]) end
+function Settings.NotifyUpdate(variable)
+    local setting = assert(settingsRegistered[variable])
+    if setting.callback then setting.callback(setting, setting:GetValue()) end
+end
 function Settings.OpenToCategory(categoryID) assert(categoryID == 321) end
 
 C_Timer = {}
@@ -211,7 +223,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.0" end end }
+C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.3" end end }
 
 local baseMap = { [1242174] = 47541 }
 local overrideMap = { [47541] = 1242174 }
@@ -347,32 +359,37 @@ SuddenDoomGlowDB = {
 }
 
 local chunk = assert(loadfile(corePath))
-chunk("SuddenDoomGlow")
 local coreDirectory = corePath:match("^(.*[/\\])") or ""
-for _, fileName in ipairs({ "Debug.lua", "Options.lua" }) do
-    local extension = loadfile(coreDirectory .. fileName)
-    if extension then extension("SuddenDoomGlow") end
+local function LoadAddonFiles()
+    local addon = {}
+    chunk("SuddenDoomGlow", addon)
+    for _, fileName in ipairs({ "Debug.lua", "Options.lua" }) do
+        local extension = assert(loadfile(coreDirectory .. fileName))
+        extension("SuddenDoomGlow", addon)
+    end
+    Advance(0) -- allow Core's deferred login to run after all TOC extensions load
+    return addon
 end
-Advance(0) -- allow Core's deferred login to run after all TOC extensions load
 
-local SDG = assert(SuddenDoomGlow)
+local addon = LoadAddonFiles()
+local SDG = addon
 local R = assert(SDG.runtime)
 assert(SDG:RegisterSettings(), "Blizzard Settings category did not register")
 local registeredSettingCount = 0
 for _ in pairs(settingsRegistered) do registeredSettingCount = registeredSettingCount + 1 end
 assert(registeredSettingCount == 4, "Settings did not register three checkboxes and the glow slider")
 local scaleSetting = assert(settingsRegistered.SuddenDoomGlow_GlowScale)
-assert(scaleSetting.valueType == Settings.VarType.Number and type(scaleSetting.get) == "function" and
-    type(scaleSetting.set) == "function", "glow size proxy setting contract is incomplete")
-local registeredScale = scaleSetting.get()
-scaleSetting.set(1.6)
-assert(scaleSetting.get() == 1.6 and SuddenDoomGlowDB.glowScale == 1.6,
+assert(scaleSetting.valueType == Settings.VarType.Number and scaleSetting.variableTable == SuddenDoomGlowDB
+    and scaleSetting.key == "glowScale", "glow size addon setting contract is incomplete")
+local registeredScale = scaleSetting:GetValue()
+scaleSetting:SetValue(1.6)
+assert(scaleSetting:GetValue() == 1.6 and SuddenDoomGlowDB.glowScale == 1.6,
     "Settings slider did not write through to SavedVariables")
-scaleSetting.set(registeredScale)
+scaleSetting:SetValue(registeredScale)
 assert(SDG:OpenSettings(), "Settings category could not be opened")
 local enabledSetting = assert(settingsRegistered.SuddenDoomGlow_Enabled)
-assert(enabledSetting.valueType == Settings.VarType.Boolean and type(enabledSetting.get) == "function" and
-    type(enabledSetting.set) == "function", "enabled checkbox proxy contract is incomplete")
+assert(enabledSetting.valueType == Settings.VarType.Boolean and enabledSetting.variableTable == SuddenDoomGlowDB
+    and enabledSetting.key == "enabled", "enabled addon setting contract is incomplete")
 local savedEnabled = SuddenDoomGlowDB.enabled
 assert(SDG:SetOption("enabled", "false") == false and SuddenDoomGlowDB.enabled == savedEnabled,
     "wrong-type boolean setting changed SavedVariables")
@@ -385,7 +402,7 @@ local function Fire(event, ...)
 end
 
 assert(SuddenDoomGlowDB.customPreserved == "yes", "DB migration destroyed unrelated settings")
-assert(SuddenDoomGlowDB.schemaVersion == 4, "schema migration missing")
+assert(SuddenDoomGlowDB.schemaVersion == 5, "schema migration missing")
 assert(SuddenDoomGlowDB.procSpellIDs == nil and SuddenDoomGlowDB.auraIDs == nil, "legacy fields retained")
 assert(R.targetFamily[47541] and R.targetFamily[207317] and R.targetFamily[1242174], "spell family incomplete")
 assert(type(SDG.GetOption) == "function" and type(SDG.SetOption) == "function", "public settings option API missing")
@@ -734,6 +751,20 @@ Advance(0.10)
 assert(not R.glowActive, "removed query candidate retained its previous positive result")
 overlayState[secretValue] = false
 
+-- User-configured spell lists are bounded before they can amplify hot-path queries.
+local savedTargets = {}
+for i = 1, #SuddenDoomGlowDB.targetSpellIDs do savedTargets[i] = SuddenDoomGlowDB.targetSpellIDs[i] end
+SuddenDoomGlowDB.targetSpellIDs = {}
+for i = 1, 32 do SuddenDoomGlowDB.targetSpellIDs[i] = 900000 + i end
+local messagesBeforeLimit = #messages
+SlashCmdList.SUDDEN_DOOM_GLOW("spell 999999")
+assert(#SuddenDoomGlowDB.targetSpellIDs == 32, "configured target limit was exceeded")
+assert(#messages == messagesBeforeLimit + 1 and messages[#messages]:find("Maximum 32", 1, true),
+    "configured target limit did not report a bounded refusal")
+SuddenDoomGlowDB.targetSpellIDs = savedTargets
+Fire("SPELLS_CHANGED")
+Advance(0.10)
+
 -- Runtime option removal survives family rebuilds and addon reloads.
 local customRoot = 990001
 SlashCmdList.SUDDEN_DOOM_GLOW("spell " .. customRoot)
@@ -746,10 +777,9 @@ Advance(0.10)
 assert(not R.targetFamily[customRoot], "removed target option returned during family rebuild")
 assert(not R.targetFamily[207317], "removed built-in target returned during family rebuild")
 local firstFrameAfterReload = #createdFrames + 1
-chunk("SuddenDoomGlow")
+addon = LoadAddonFiles()
 activeEventFrame = createdFrames[firstFrameAfterReload]
-Advance(0)
-SDG = assert(SuddenDoomGlow)
+SDG = addon
 R = assert(SDG.runtime)
 assert(not R.targetFamily[customRoot], "removed target option returned after addon reload")
 assert(not R.targetFamily[207317], "removed built-in target returned after addon reload")
@@ -806,24 +836,26 @@ inCombat = false
 FireCurrent("PLAYER_REGEN_ENABLED")
 
 -- Late-loading Settings registration waits for combat to end.
-local priorProxyCalls = proxyRegistrationCalls
+local priorAddonSettingCalls = addonSettingRegistrationCalls
+local framesBeforeLateOptions = #createdFrames
 inCombat = true
-assert(loadfile(coreDirectory .. "Options.lua"))("SuddenDoomGlow")
-local lateOptionsFrame = createdFrames[#createdFrames]
+assert(loadfile(coreDirectory .. "Options.lua"))("SuddenDoomGlow", addon)
+assert(#createdFrames == framesBeforeLateOptions, "loading Options created an idle event owner")
 assert(SDG:RegisterSettings() == false, "combat-time Settings registration was not deferred")
-assert(proxyRegistrationCalls == priorProxyCalls, "Settings controls were created during combat")
+local lateOptionsFrame = createdFrames[#createdFrames]
+assert(#createdFrames == framesBeforeLateOptions + 1, "deferred Settings owner was not created on demand")
+assert(addonSettingRegistrationCalls == priorAddonSettingCalls, "Settings controls were created during combat")
 inCombat = false
 lateOptionsFrame.scripts.OnEvent(lateOptionsFrame, "PLAYER_REGEN_ENABLED")
-assert(proxyRegistrationCalls == priorProxyCalls + 4, "deferred Settings registration did not finish after combat")
+assert(addonSettingRegistrationCalls == priorAddonSettingCalls + 4, "deferred Settings registration did not finish after combat")
 
 -- A future SavedVariables schema is preserved and disables runtime controls.
 SuddenDoomGlowDB.schemaVersion = 99
 SuddenDoomGlowDB.futureSetting = "keep"
 local frameBeforeFutureSchema = #createdFrames + 1
-chunk("SuddenDoomGlow")
+addon = LoadAddonFiles()
 activeEventFrame = createdFrames[frameBeforeFutureSchema]
-Advance(0)
-SDG = assert(SuddenDoomGlow)
+SDG = addon
 R = assert(SDG.runtime)
 assert(R.unsupportedSchema, "future SavedVariables schema was not recognized")
 assert(SuddenDoomGlowDB.schemaVersion == 99 and SuddenDoomGlowDB.futureSetting == "keep",
@@ -857,13 +889,12 @@ assert(not futureCommandOutput:find("Debug:", 1, true)
     "future-schema slash command reported a false successful update")
 
 -- Other classes initialize without registering the Death Knight runtime.
-SuddenDoomGlowDB.schemaVersion = 4
+SuddenDoomGlowDB.schemaVersion = 5
 playerClassName = "MAGE"
 local frameBeforeOtherClass = #createdFrames + 1
-chunk("SuddenDoomGlow")
+addon = LoadAddonFiles()
 activeEventFrame = createdFrames[frameBeforeOtherClass]
-Advance(0)
-SDG = assert(SuddenDoomGlow)
+SDG = addon
 R = assert(SDG.runtime)
 assert(R.class == "MAGE" and not R.runtimeRegistered,
     "non-Death Knight login registered the proc runtime")

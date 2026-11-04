@@ -1,17 +1,17 @@
 # Live client checklist
 
-For Sudden Doom Glow `1.4.2`, Retail 12.1.5, expected interface `120105`. Current source recheck is build `70783`; runtime status remains **NOT-RUN**.
+For Sudden Doom Glow `1.4.3`, Retail 12.1.5, expected interface `120105`; current source recheck is build `70783`.
 
-- [ ] Record `/sdglow status`, exact addon commit/package, client build/Interface, date, character/spec, and addon stack.
-- [ ] Test one and two stacks, consumption, expiry, and immediate reacquisition.
+- [ ] Record `/sdglow status`, exact commit/package, client build/Interface, date, character/spec, bar implementation, Cooldown Viewer layout, and addon stack.
+- [ ] Test one/two stacks, consumption, expiry, and immediate reacquisition.
 - [ ] Capture overlay payload IDs and immediate/next-frame/post-grace query results.
-- [ ] Change action pages, modifiers, vehicle/override states, and assignments during combat; verify current assignments only.
-- [ ] Load unrelated addons and supported bar addons; confirm only supported integrations trigger mapping recovery.
-- [ ] Exercise all four Cooldown Viewer surfaces through data-ready/acquire/reset/reuse/reorder/Edit Mode/spec/talent/table-hotfix paths.
-- [ ] Confirm CDM table hotfix and talent/spell invalidations do not visibly clear/restart an active proc or retain stale overrides.
-- [ ] Confirm delayed alert hide and missed animation start recover after access returns, including while disabled.
+- [ ] Change assignments, pages, modifiers, vehicle/override states during combat; verify only current assignments glow.
+- [ ] Exercise all four Cooldown Viewer surfaces through data-ready, acquire, reset, reuse, reorder, Edit Mode, spec/talent, and hotfix paths.
+- [ ] Confirm mapping invalidation does not visibly clear/restart a valid proc.
+- [ ] Confirm pending hide, animation, and geometry recovery when access returns, including while disabled.
+- [ ] Confirm target/signal list limits and Settings/slash synchronization.
 - [ ] Check open world, encounter, Mythic+, arena, and battleground contexts where available.
-- [ ] Check Lua, taint, forbidden-object, and restricted-value errors with the addon alone and in the normal stack.
+- [ ] Record zero repeating Lua, taint, forbidden-object, or restricted-value errors.
 - [ ] Measure CPU/allocation in one fixed repeatable scene.
 
-Append evidence to `VALIDATION.md`. Source inspection and stub tests are not live-client passes.
+Append evidence to `VALIDATION.md`. Source inspection and host stubs are not live-client passes.

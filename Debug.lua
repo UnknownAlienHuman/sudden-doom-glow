@@ -1,6 +1,6 @@
 -- Sudden Doom Glow: optional visual diagnostics, separate from runtime state.
 
-local SDG = _G.SuddenDoomGlow
+local _addonName, SDG = ...
 if type(SDG) ~= "table" then return end
 
 local MAX_LINES = 120
@@ -25,8 +25,13 @@ local function SafePrint(message)
 end
 
 local function SafeMessage(value)
-    if type(_G.issecretvalue) == "function" and _G.issecretvalue(value) then return nil end
-    if type(_G.canaccessvalue) == "function" and not _G.canaccessvalue(value) then return nil end
+    if type(_G.canaccessvalue) == "function" then
+        local ok, accessible = pcall(_G.canaccessvalue, value)
+        if not ok or not accessible then return nil end
+    elseif type(_G.issecretvalue) == "function" then
+        local ok, secret = pcall(_G.issecretvalue, value)
+        if not ok or secret then return nil end
+    end
     local kind = type(value)
     if kind ~= "string" and kind ~= "number" and kind ~= "boolean" then return nil end
     return tostring(value)
@@ -224,6 +229,3 @@ function UI:Hide()
     if frame then frame:Hide() end
 end
 
--- This nonvisual event owner may be created during a late combat-time load;
--- the debug window itself is still created only after lockdown ends.
-EnsureDeferredWorkFrame()

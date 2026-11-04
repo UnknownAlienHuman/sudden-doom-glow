@@ -1,70 +1,73 @@
 # Architecture
 
-Release `1.4.2` targets Retail 12.1.5, expected interface `120105`. The KB-selected source is `12.1.5.70688`; current live source `12.1.5.70783` was checked on 2026-11-03 and contains no changes in the source slices used here. Client behavior remains **NOT-RUN**.
+Release `1.4.3` targets Retail 12.1.5 with expected interface `120105`. Current live source `12.1.5.70783` was checked on 2026-11-04; the relevant ActionBar, Spell Activation Overlay, alert-template, Settings, and Cooldown Viewer contracts remain compatible with the selected KB baseline. Named-client behavior remains **NOT-RUN**.
 
 ## Runtime flow
 
 ```mermaid
 flowchart TD
-    Login[PLAYER_LOGIN] --> Family[Build configured target and signal families]
-    Family --> Buttons[Observe named/current action-button assignments]
+    Login[PLAYER_LOGIN] --> DB[Migrate and validate SavedVariables]
+    DB --> Families[Build bounded target and signal families]
+    Families --> Buttons[Resolve known button assignments]
     Login --> Viewer[Attach Cooldown Viewer lifecycle outside combat]
     Overlay[Overlay SHOW/HIDE] --> Arbitration[Event/query arbitration]
     Query[IsSpellOverlayed] --> Arbitration
-    Assignment[Action assignment event] --> Buttons
-    Override[Cooldown Viewer override/hotfix] --> Family
-    Arbitration --> State[Desired glow state]
-    Buttons --> Render[Addon-owned alert]
+    Assignment[Action assignment changes] --> Buttons
+    Mapping[Override/hotfix/talent/spell invalidation] --> Families
+    Arbitration --> Desired[Desired glow state]
+    Buttons --> Render[Addon-owned alert surfaces]
     Viewer --> Render
-    State --> Render
-    Combat[Combat lockdown] --> Deferred[One deferred structural rescan]
+    Desired --> Render
+    Combat[Combat lockdown] --> Deferred[One latest post-combat structural pass]
     Deferred --> Buttons
     Deferred --> Viewer
 ```
 
+## Ownership model
+
+Every file receives the same second TOC vararg table. `Core.lua`, `Debug.lua`, and `Options.lua` compose through that table; implementation state stays file-local. The only intentional globals are the SavedVariables root, slash-command registration, and the named debug frame required by `UISpecialFrames`.
+
 ## Detection
 
-The Spell Activation Overlay event/query pair is the sole proc authority. Synchronous SHOW/HIDE events wake reconciliation. The official query supplies current state when its caller, argument, and result are accessible. A short SHOW grace covers unresolved same-frame ordering; unavailable query state has one bounded fallback lifetime.
+The Spell Activation Overlay event/query pair is the sole proc authority. SHOW/HIDE events are synchronous wake-ups. The official query supplies current state when caller, argument, and result are accessible. A short SHOW grace covers same-frame ordering; inaccessible/unavailable query state has one bounded fallback lifetime.
 
-Action-bar and addon-load events update assignment ownership. Cooldown Viewer hotfix plus talent/spell invalidations drop stale override observations and rebuild mappings without forcing an OFF/ON transition. Irrelevant override events are ignored.
+Action-bar events update assignment ownership only. Mapping invalidations coalesce outside combat and refresh already observed assignments immediately in combat without creating structure. Duplicate or irrelevant Cooldown Viewer override events do no work.
 
-## Spell identity
+## Spell identity and bounds
 
-`targetRoots` comes from SavedVariables. `targetFamily` expands roots using `C_Spell.GetBaseSpell`, `C_Spell.GetOverrideSpell`, and explicit `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` pairs. `signalFamily` contains target-family IDs plus explicitly configured overlay aliases. An alias does not become an action-button target merely because it produced an event.
+`targetSpellIDs` and `signalSpellIDs` are validated ordinary integer arrays, capped at 32 entries each. `targetFamily` expands configured roots through `C_Spell.GetBaseSpell`, `C_Spell.GetOverrideSpell`, and explicit Cooldown Viewer override pairs. `signalFamily` adds configured overlay aliases. An alias does not become an action-button target merely because it produced an event.
 
 ## Action buttons
 
-The addon observes stock buttons and supported named third-party surfaces. The current action slot is resolved from the button's authoritative provider. `C_ActionBar.GetSpell` is primary; an ordinary no-spell result may fall back to `GetActionInfo` and resolved `GetMacroSpell`.
+Known stock and supported third-party button surfaces are weakly tracked. The current action slot is resolved from the button's authoritative provider; `C_ActionBar.GetSpell` is primary, with a resolved action/macro fallback only when ordinary and available.
 
-A positive slot event receives one immediate targeted update. Bursty or broad invalidations collapse into one next-frame full pass over known buttons. No slot sweep, macro-body search, per-frame polling, or action-event proc query is used.
+One-slot changes get a targeted refresh. Bursty/broad invalidations collapse into one complete pass. There is no 540-slot sweep, macro-body parsing, per-frame polling, or action-event proc query.
 
 ## Cooldown Viewer
 
-The adapter uses the public data-ready event as a recovery wake-up and observes the four selected viewer instances and their active item pools only at setup/recovery boundaries. Actual viewer/item instances are post-hooked once outside combat. Item identity uses `GetBaseSpellID`; `GetSpellID` is deliberately excluded because managed aura/linked-spell precedence can change its meaning.
+The adapter uses public data/override/hotfix events as wake-ups and source-verified private instance methods as a narrow compatibility boundary. Viewer pools are enumerated only during setup/recovery outside combat. Actual viewer/item instances are post-hooked once. Item identity uses `GetBaseSpellID`; linked managed aura state is never inspected.
 
-A reset/reassignment callback can clear one item. A complete readable observation of all selected viewer pools may prune unseen items. A missing, inaccessible, or unreadable viewer/pool table makes the generation incomplete and therefore cannot authorize pruning.
-
-During combat, only already observed item instances and existing alerts are refreshed. New hooks, pool enumeration, parenting, sizing, anchoring, and alert construction wait for one post-combat rescan.
+A complete readable generation covering all four selected viewers may prune unseen items. Missing, inaccessible, or unreadable viewers/pools are incomplete evidence and cannot authorize pruning. During combat, only observed items and existing alerts are reused.
 
 ## Rendering
 
-Frame metadata lives in weak-key addon tables. The addon creates a child from `ActionButtonSpellAlertTemplate` but does not call or mutate `ActionButtonSpellAlertManager`.
+Frame state is held in weak-key addon tables. The addon creates its own `ActionButtonSpellAlertTemplate` child and never joins or patches `ActionButtonSpellAlertManager`.
 
-Show/hide is idempotent. Animation start is tracked separately from frame visibility: if an animation object is temporarily inaccessible, the visible alert remains owned and a later authoritative lifecycle refresh retries the animation without requiring a second proc edge. Inaccessible OFF transitions become owned pending hides and are recovered without polling.
+Show/hide is idempotent. Visibility, animation, and geometry readiness are tracked separately. Structural geometry failures remain dirty and retry on an authoritative lifecycle pass; inaccessible OFF transitions become owned pending hides. No polling is used.
 
-## Persistence
+## Settings and persistence
 
-`SuddenDoomGlowDB` stores ordinary user settings and `schemaVersion`. Migrations preserve unrelated data and intentional empty spell lists. Future schemas are preserved unchanged, disable runtime mutation, and produce explicit command errors. Frames, timers, hooks, event signals, resolved families, and override observations remain runtime-only.
+`SuddenDoomGlowDB` owns `enabled`, `cdm`, `debug`, `glowScale`, bounded target/signal lists, schema, and producer version. Migration runs once before Settings registration. Blizzard's Settings UI writes ordinary fields through `RegisterAddOnSetting`; addon callbacks apply idempotent runtime effects.
+
+Future schemas are preserved unchanged and disable all mutation. Frames, timers, callback owners, hooks, event signals, resolved families, and observed override relationships remain runtime-only.
 
 ## Code map
 
 | Area | Owner |
 |---|---|
-| SavedVariables, spell families, overlay arbitration, action mapping | `Core.lua` |
-| Alert ownership and lifecycle | `Core.lua` |
-| Cooldown Viewer adapter | `Core.lua` |
-| Blizzard Settings UI | `Options.lua` |
-| Bounded diagnostics | `Debug.lua` |
-| Source evidence | `docs/API_CONTRACTS.md` |
-| Broad and focused stub regressions | `tests/runtime_smoke.lua`, `tests/runtime_regression_1_4_2.lua` |
-| Deterministic release archive | `scripts/package.py` |
+| Runtime, persistence, rendering, integrations | `Core.lua` |
+| Blizzard Settings | `Options.lua` |
+| Diagnostics | `Debug.lua` |
+| Source contracts | `docs/API_CONTRACTS.md` |
+| Broad/focused host regressions | `tests/runtime_smoke.lua`, `tests/runtime_regression.lua` |
+| Deterministic package | `scripts/package.py` |

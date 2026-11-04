@@ -2,10 +2,10 @@
 
 Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto matching Death Coil, Epidemic, replacement action buttons, and configured Blizzard Cooldown Viewer items.
 
-- **Version:** 1.4.2
+- **Version:** 1.4.3
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
-- **Current live UI source:** build `12.1.5.70783`, commit `297d7aaaa736f346b3e036f38ee088eaf7f8c07f` (checked 2026-11-03)
+- **Current live UI source:** build `12.1.5.70783`, commit `297d7aaaa736f346b3e036f38ee088eaf7f8c07f` (checked 2026-11-04)
 - **Relevant source baseline:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5`; the complete `70688 → 70783` delta does not touch ActionBar, Spell Activation Overlay, or Cooldown Viewer files
 - **SavedVariables:** `SuddenDoomGlowDB`
 - **Optional dependency:** `Blizzard_CooldownViewer`
@@ -29,7 +29,7 @@ Open **Settings → AddOns → Sudden Doom Glow**, or enter `/sdglow`.
 - Adjust glow size from `1.0` to `1.8` (default `1.4`).
 - Open the dark green diagnostic log when troubleshooting.
 
-Settings and debug windows wait until combat ends before opening. `/sdglow test` previews the glow for two seconds. Changes through slash commands also refresh the Settings controls.
+Settings use native `RegisterAddOnSetting` fields after deterministic migration and validation. Settings and debug windows wait until combat ends before opening. `/sdglow test` previews the glow for two seconds. Slash-command changes refresh the same controls.
 
 ## Commands
 
@@ -48,7 +48,7 @@ Settings and debug windows wait until combat ends before opening. `/sdglow test`
 
 `/sdglow aura <spellID>` remains a compatibility alias for `/sdglow signal <spellID>`.
 
-Default target spells are Death Coil (`47541`), Epidemic (`207317`) and Necrotic Coil (`1242174`). Detection also includes the Sudden Doom signal aliases `450932` and `81340`. The spell/signal commands toggle configured IDs; removals persist across updates and reloads. Base spells and their replacements form one target family, so a remaining configured replacement can still include its base spell.
+Default target spells are Death Coil (`47541`), Epidemic (`207317`) and Necrotic Coil (`1242174`). Detection also includes the Sudden Doom signal aliases `450932` and `81340`. The spell/signal commands toggle configured IDs; removals persist across updates and reloads. Each list is capped at 32 IDs so overlay queries and SavedVariables normalization remain bounded. Base spells and their replacements form one target family, so a remaining configured replacement can still include its base spell.
 
 Existing settings migrate without a database wipe. Settings from a newer schema are preserved and left inactive until a compatible addon version is installed.
 
@@ -60,9 +60,9 @@ Run these commands from a repository checkout; the install archive does not incl
 
 ```bash
 python tests/static_checks.py .
-luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression_1_4_2.lua
-lua tests/runtime_smoke.lua Core.lua
-lua tests/runtime_regression_1_4_2.lua Core.lua
+luac5.1 -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression.lua
+lua5.1 tests/runtime_smoke.lua Core.lua
+lua5.1 tests/runtime_regression.lua Core.lua
 ```
 
 ## Packaging
@@ -73,7 +73,7 @@ Build the deterministic install archive with:
 python scripts/package.py
 ```
 
-The default output is `dist/SuddenDoomGlow-1.4.2.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
+The default output is `dist/SuddenDoomGlow-1.4.3.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
 
 ## Install
 
