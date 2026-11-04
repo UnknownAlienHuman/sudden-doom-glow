@@ -1,6 +1,6 @@
 # Live client checklist
 
-For Sudden Doom Glow `1.4.3`, Retail 12.1.5, expected interface `120105`; current source recheck is build `70783`.
+For Sudden Doom Glow `1.4.4`, Retail 12.1.5, expected interface `120105`; current source recheck is build `70783`.
 
 - [ ] Record `/sdglow status`, exact commit/package, client build/Interface, date, character/spec, bar implementation, Cooldown Viewer layout, and addon stack.
 - [ ] Test one/two stacks, consumption, expiry, and immediate reacquisition.

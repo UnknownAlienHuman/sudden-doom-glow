@@ -42,6 +42,17 @@ The selected source supplies four viewer instances, active `itemFramePool` objec
 
 `enabled`, `cdm`, `debug`, and `glowScale` are ordinary fields, so `Options.lua` uses `Settings.RegisterAddOnSetting`. Migration, validation, normalization, and runtime effects remain in `Core.lua`. Proxy settings are intentionally absent.
 
+## External implementation evidence
+
+Current donor implementations are pinned and summarized in [`DONOR_REVIEW.md`](DONOR_REVIEW.md). They establish naming and lifecycle evidence only:
+
+- Bartender4/LibActionButton confirm `BT4ButtonN`, current-action ownership, and centralized event dispatch;
+- ElvUI confirms `ElvUI_Bar<bar>Button<slot>` names;
+- Dominos confirms mixed `DominosActionButtonN` and `MultiBar*ActionButtonN` families;
+- WeakAuras and LibCustomGlow confirm keyed visual ownership and exact terminal cleanup.
+
+No donor private registry is treated as a public API, and LibCustomGlow is intentionally not embedded.
+
 ## Runtime status
 
 Expected interface is `120105`. Exact Lua 5.1 host checks are recorded in `VALIDATION.md`. Named-client combat, taint, rendering, and performance remain **NOT-RUN**.

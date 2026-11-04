@@ -101,7 +101,10 @@ function UnitClass() return "Death Knight", "DEATHKNIGHT" end
 function IsLoggedIn() return true end
 function EnumerateFrames() return nil end
 function canaccessvalue(value) return value ~= secretValue end
-function canaccesstable(value) return value.tableAccessible ~= false end
+function canaccesstable(value)
+    if value.raiseTableAccess then error("table access probe failed") end
+    return value.tableAccessible ~= false
+end
 function issecretvalue(value) return value == secretValue end
 function GetMacroSpell() return nil end
 function GetActionInfo(slot)
@@ -140,7 +143,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.3" or nil end }
+C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.4" or nil end }
 local currentOverrideSpellID = 1242174
 C_Spell = {
     GetBaseSpell = function(spellID)
@@ -220,6 +223,8 @@ ActionButton1 = NewFrame("ActionButton1")
 ActionButton1.action = 1
 ActionButton2 = NewFrame("ActionButton2")
 ActionButton2.action = 2
+MultiBarRightActionButton1 = NewFrame("MultiBarRightActionButton1")
+MultiBarRightActionButton1.action = 1
 
 Settings = { VarType = { Boolean = "boolean", Number = "number" } }
 local settingsCategory = { GetID = function() return 321 end }
@@ -266,6 +271,10 @@ end
 assert(R.runtimeRegistered, "runtime did not start")
 assert(unitEventRegistrations == 0, "unrelated UNIT_SPELLCAST_SUCCEEDED owner remains")
 assert(not eventFrame.events.UNIT_SPELLCAST_SUCCEEDED, "spellcast event remains registered")
+assert(R.knownButtons[MultiBarRightActionButton1],
+    "current Dominos compatibility-name button was not discovered")
+assert(R.frameState[MultiBarRightActionButton1] and R.frameState[MultiBarRightActionButton1].alert,
+    "current Dominos compatibility-name button was not prepared before combat")
 
 -- Object access must precede IsForbidden.
 local gateLog = {}
@@ -279,6 +288,8 @@ overlayState[47541] = true
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
 local preAccessState = assert(R.frameState[ActionButton1])
 assert(preAccessState.shown, "precondition: action alert did not show")
+assert(R.frameState[MultiBarRightActionButton1].shown,
+    "current Dominos compatibility-name button did not receive the proc glow")
 ActionButton1.accessible = false
 actionCallbacks["ActionButton.OnActionChanged"].callback(nil, ActionButton1)
 assert(not preAccessState.shown, "unreadable reassignment left a stale action glow")
@@ -383,6 +394,11 @@ activeEssential[1] = nil
 SDG:RescanButtons(false)
 assert(R.cdmFrames[cdmItem], "inaccessible viewer pool table pruned tracked item")
 UtilityCooldownViewer.itemFramePool.tableAccessible = true
+UtilityCooldownViewer.itemFramePool.raiseTableAccess = true
+assert(pcall(SDG.RescanButtons, SDG, false),
+    "failing canaccesstable probe escaped the external-pool boundary")
+assert(R.cdmFrames[cdmItem], "failed viewer pool access probe pruned tracked item")
+UtilityCooldownViewer.itemFramePool.raiseTableAccess = nil
 activeEssential[1] = cdmItem
 
 -- Enabling CDM in combat must not enumerate pools or attach a newly observed item.
@@ -438,4 +454,27 @@ enabledSetting:SetValue(true)
 assert(SuddenDoomGlowDB.enabled and R.runtimeRegistered,
     "direct addon setting did not restart the runtime")
 
-print("runtime regression 1.4.3: PASS")
+-- A full legacy list plus seeded defaults must still respect the hard bound.
+assert(SDG:SetOption("enabled", false))
+local legacyTargets, legacySignals = {}, {}
+for i = 1, 32 do
+    legacyTargets[i] = 910000 + i
+    legacySignals[i] = 920000 + i
+end
+SuddenDoomGlowDB = {
+    schemaVersion = 2,
+    enabled = false,
+    debug = false,
+    cdm = false,
+    targetSpellIDs = legacyTargets,
+    signalSpellIDs = legacySignals,
+}
+local boundedAddon = {}
+assert(loadfile(corePath))("SuddenDoomGlow", boundedAddon)
+Advance(0)
+assert(#SuddenDoomGlowDB.targetSpellIDs == 32,
+    "legacy target defaults exceeded the configured ID bound")
+assert(#SuddenDoomGlowDB.signalSpellIDs == 32,
+    "legacy signal defaults exceeded the configured ID bound")
+
+print("runtime regression 1.4.4: PASS")

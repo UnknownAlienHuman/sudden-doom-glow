@@ -125,8 +125,8 @@ end
 local function IsReadableTable(value)
     if not IsAccessible(value) or type(value) ~= "table" then return false end
     if type(canaccesstable) == "function" then
-        local readable = canaccesstable(value)
-        return IsAccessible(readable) and readable and true or false
+        local ok, readable = pcall(canaccesstable, value)
+        return ok and IsAccessible(readable) and readable and true or false
     end
     return true
 end
@@ -290,6 +290,7 @@ local function MergeNumericDefaults(destination, defaults)
     local seen = {}
     for i = 1, #result do seen[result[i]] = true end
     for i = 1, #defaults do
+        if #result >= MAX_CONFIGURED_SPELL_IDS then break end
         local id = defaults[i]
         if not seen[id] then
             seen[id] = true
@@ -783,6 +784,15 @@ local NAMED_BUTTON_SETS = {
     { "MultiBar10Button", 12 },
     { "BT4Button", 180, true },
     { "DominosActionButton", 180, true },
+    -- Current Dominos reuses these Blizzard-style compatibility names for
+    -- bars whose IDs are outside its own ActionButton name ranges.
+    { "MultiBarRightActionButton", 12, true },
+    { "MultiBarLeftActionButton", 12, true },
+    { "MultiBarBottomRightActionButton", 12, true },
+    { "MultiBarBottomLeftActionButton", 12, true },
+    { "MultiBar5ActionButton", 12, true },
+    { "MultiBar6ActionButton", 12, true },
+    { "MultiBar7ActionButton", 12, true },
 }
 
 local function MapNamedButtons()

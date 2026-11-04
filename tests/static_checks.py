@@ -15,7 +15,7 @@ def metadata(name: str) -> str:
 interface = int(metadata("Interface"))
 assert interface == 120105, f"unexpected Retail 12.1.5 interface: {interface}"
 version = metadata("Version")
-assert version == "1.4.3", f"unexpected addon version: {version!r}"
+assert version == "1.4.4", f"unexpected addon version: {version!r}"
 assert metadata("OptionalDeps") == "Blizzard_CooldownViewer"
 assert metadata("SavedVariables") == "SuddenDoomGlowDB"
 
@@ -48,6 +48,8 @@ for token in (
     "ActionButton.OnActionChanged",
     "ActionButtonSpellAlertTemplate",
     "MAX_CONFIGURED_SPELL_IDS = 32",
+    "MultiBarRightActionButton",
+    "MultiBarBottomLeftActionButton",
     "QueueMappingRecovery",
     "pendingHides",
     "geometryReady",
@@ -95,6 +97,12 @@ assert 0 <= body.find("IsAccessible(value)") < body.find("type(value)"), (
 
 access_gate = re.search(r"local function IsAccessible\(value\)(.*?)\nend", core, re.DOTALL)
 assert access_gate and "pcall(canaccessvalue, value)" in access_gate.group(1)
+
+table_gate = re.search(r"local function IsReadableTable\(value\)(.*?)\nend", core, re.DOTALL)
+assert table_gate and "pcall(canaccesstable, value)" in table_gate.group(1)
+
+merge_defaults = re.search(r"local function MergeNumericDefaults\(destination, defaults\)(.*?)\nend", core, re.DOTALL)
+assert merge_defaults and "#result >= MAX_CONFIGURED_SPELL_IDS" in merge_defaults.group(1)
 
 frame_gate = re.search(r"local function FrameCanBeUsed\(frame\)(.*?)\nend", core, re.DOTALL)
 assert frame_gate

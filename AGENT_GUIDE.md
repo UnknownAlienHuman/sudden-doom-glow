@@ -2,7 +2,7 @@
 
 ## Target and evidence
 
-- Release: `1.4.3`
+- Release: `1.4.4`
 - Target: Retail `12.1.5`; expected TOC interface `120105`
 - Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`
 - KB-selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
@@ -34,6 +34,7 @@ Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, and both 
 - `Options.lua`: Blizzard Settings registration and combat deferral.
 - `Debug.lua`: bounded diagnostic log/window.
 - `docs/API_CONTRACTS.md`: source pins and private/public boundaries.
+- `docs/DONOR_REVIEW.md`: pinned external implementations and transfer/rejection decisions.
 - `VALIDATION.md`: executed checks and remaining uncertainty.
 - `scripts/package.py`: deterministic allowlisted release archive.
 

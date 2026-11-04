@@ -223,7 +223,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.3" end end }
+C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.4" end end }
 
 local baseMap = { [1242174] = 47541 }
 local overrideMap = { [47541] = 1242174 }
@@ -348,6 +348,8 @@ deepOnlyButton.action = 60
 deepEnumerationItems[1] = deepOnlyButton
 MultiBarBottomLeftButton1 = NewFrame("MultiBarBottomLeftButton1")
 MultiBarBottomLeftButton1.action = 13
+MultiBarRightActionButton1 = NewFrame("MultiBarRightActionButton1")
+MultiBarRightActionButton1.action = 1
 
 SuddenDoomGlowDB = {
     enabled = true,
@@ -415,6 +417,10 @@ assert(R.frameState[ActionButton1] and R.frameState[ActionButton1].alert,
     "Death Coil alert was not prepared")
 assert(R.frameState[MultiBarBottomLeftButton1] and R.frameState[MultiBarBottomLeftButton1].alert,
     "Epidemic alert was not prepared")
+assert(R.knownButtons[MultiBarRightActionButton1]
+    and R.frameState[MultiBarRightActionButton1]
+    and R.frameState[MultiBarRightActionButton1].alert,
+    "current Dominos compatibility-name button was not prepared")
 assert(R.cdmFrames[cdmItem], "Cooldown Viewer item not tracked")
 assert(actionGetSpellCalls > 0, "current action slots were not resolved through C_ActionBar.GetSpell")
 local callback = assert(actionCallbacks["ActionButton.OnActionChanged"]).callback
@@ -434,6 +440,8 @@ ActionButton3.action = 4
 overlayState[47541] = true
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
 assert(R.glowActive, "overlay query did not enable glow")
+assert(R.frameState[MultiBarRightActionButton1].shown,
+    "current Dominos compatibility-name button did not glow")
 local actionAlert = assert(R.frameState[ActionButton1].alert)
 local initialPlays = actionAlert.ProcStartAnim.playCount
 local enumBeforeRepeatedEvents = cdmEnumerations

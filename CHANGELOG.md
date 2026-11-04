@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.4 — 2026-11-04
+
+- Audit current WeakAuras, Bartender4, LibActionButton, Dominos, ElvUI, and LibCustomGlow implementations against the knowledge-base rules; record exact pins and rejected transfers.
+- Add current Dominos `MultiBar*ActionButtonN` compatibility families so their alert surfaces are discovered and prepared outside combat without a global deep scan.
+- Keep Bartender4 and ElvUI adapters unchanged after confirming their current global button names.
+- Enforce the 32-ID limit while merging legacy defaults, preventing migration from writing oversized target/signal lists.
+- Fail closed when `canaccesstable` itself errors while probing a foreign Cooldown Viewer pool.
+- Add exact Lua 5.1 regressions for Dominos naming, migration bounds, and failed table-access probes. Live-client validation remains **NOT-RUN**.
+
 ## 1.4.3 — 2026-11-04
 
 - Replace proxy settings with native `RegisterAddOnSetting` ownership for ordinary SavedVariables fields; keep migration, normalization, and idempotent runtime effects in the addon.

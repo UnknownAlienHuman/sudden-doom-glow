@@ -1,6 +1,6 @@
 # Architecture
 
-Release `1.4.3` targets Retail 12.1.5 with expected interface `120105`. Current live source `12.1.5.70783` was checked on 2026-11-04; the relevant ActionBar, Spell Activation Overlay, alert-template, Settings, and Cooldown Viewer contracts remain compatible with the selected KB baseline. Named-client behavior remains **NOT-RUN**.
+Release `1.4.4` targets Retail 12.1.5 with expected interface `120105`. Current live source `12.1.5.70783` was checked on 2026-11-04; the relevant ActionBar, Spell Activation Overlay, alert-template, Settings, and Cooldown Viewer contracts remain compatible with the selected KB baseline. Named-client behavior remains **NOT-RUN**.
 
 ## Runtime flow
 
@@ -39,7 +39,7 @@ Action-bar events update assignment ownership only. Mapping invalidations coales
 
 ## Action buttons
 
-Known stock and supported third-party button surfaces are weakly tracked. The current action slot is resolved from the button's authoritative provider; `C_ActionBar.GetSpell` is primary, with a resolved action/macro fallback only when ordinary and available.
+Known stock and supported third-party button surfaces are weakly tracked. The current action slot is resolved from the button's authoritative provider; `C_ActionBar.GetSpell` is primary, with a resolved action/macro fallback only when ordinary and available. Named adapters cover current `BT4ButtonN`, `ElvUI_BarXButtonY`, `DominosActionButtonN`, and Dominos `MultiBar*ActionButtonN` families; the exact donor pins and limits are recorded in `docs/DONOR_REVIEW.md`.
 
 One-slot changes get a targeted refresh. Bursty/broad invalidations collapse into one complete pass. There is no 540-slot sweep, macro-body parsing, per-frame polling, or action-event proc query.
 
@@ -69,5 +69,6 @@ Future schemas are preserved unchanged and disable all mutation. Frames, timers,
 | Blizzard Settings | `Options.lua` |
 | Diagnostics | `Debug.lua` |
 | Source contracts | `docs/API_CONTRACTS.md` |
+| External implementation evidence | `docs/DONOR_REVIEW.md` |
 | Broad/focused host regressions | `tests/runtime_smoke.lua`, `tests/runtime_regression.lua` |
 | Deterministic package | `scripts/package.py` |
