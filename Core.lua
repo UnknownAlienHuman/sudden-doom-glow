@@ -78,11 +78,13 @@ local R = {
     overlayQueryReadable = 0,
     overlayQueryCandidates = 0,
     overlayQueryAuthoritative = false,
+    queryHintSpellID = nil,
 
     glowActive = false,
     lastDetection = "none",
     testUntil = 0,
     needsGeometry = false,
+    geometryToken = {},
     unsupportedSchema = false,
 
     needsRescan = false,
@@ -134,6 +136,41 @@ local function IsReadableTable(value)
         return ok and IsAccessible(readable) and readable and true or false
     end
     return true
+end
+
+local function ReadIndex(container, key)
+    return container[key]
+end
+
+local function WriteIndex(container, key, value)
+    container[key] = value
+end
+
+-- Foreign script objects and tables can become inaccessible after discovery.
+-- Every member lookup is therefore an access-gated operation, not a harmless
+-- prelude to a protected call. `known=false` includes denied and throwing reads.
+local function ReadMember(container, key)
+    if not IsAccessible(container) then return nil, false end
+    if container == nil then return nil, false end
+    if type(container) == "table" and not IsReadableTable(container) then
+        return nil, false
+    end
+    local ok, value = pcall(ReadIndex, container, key)
+    if not ok or not IsAccessible(value) then return nil, false end
+    return value, true
+end
+
+local function CallMethod(container, methodName, ...)
+    local method, known = ReadMember(container, methodName)
+    if not known or type(method) ~= "function" then return false end
+    return pcall(method, container, ...)
+end
+
+local function WriteMember(container, key, value)
+    if not IsAccessible(container) or container == nil then return false end
+    if not IsAccessible(value) then return false end
+    if type(container) == "table" and not IsReadableTable(container) then return false end
+    return pcall(WriteIndex, container, key, value)
 end
 
 local function SafeMessage(value)
@@ -209,12 +246,18 @@ local function FrameCanBeUsed(frame)
     if kind ~= "table" and kind ~= "userdata" then return false end
     -- Current-context access is the first object gate. It is not cached across
     -- callbacks, combat, restriction transitions or deferred work.
-    if type(frame.CanBeAccessedInContext) == "function" then
-        local ok, accessible = pcall(frame.CanBeAccessedInContext, frame)
+    local accessMethod, accessKnown = ReadMember(frame, "CanBeAccessedInContext")
+    if not accessKnown then return false end
+    if accessMethod ~= nil then
+        if type(accessMethod) ~= "function" then return false end
+        local ok, accessible = pcall(accessMethod, frame)
         if not ok or not IsAccessible(accessible) or not accessible then return false end
     end
-    if type(frame.IsForbidden) == "function" then
-        local ok, forbidden = pcall(frame.IsForbidden, frame)
+    local forbiddenMethod, forbiddenKnown = ReadMember(frame, "IsForbidden")
+    if not forbiddenKnown then return false end
+    if forbiddenMethod ~= nil then
+        if type(forbiddenMethod) ~= "function" then return false end
+        local ok, forbidden = pcall(forbiddenMethod, frame)
         if not ok or not IsAccessible(forbidden) or forbidden then return false end
     end
     return true
@@ -243,7 +286,7 @@ local function CancelTimers()
 end
 
 local function ClearQueryObservation()
-    R.lastQueryActiveAt, R.lastQuerySpellID = nil, nil
+    R.lastQueryActiveAt, R.lastQuerySpellID, R.queryHintSpellID = nil, nil, nil
     CancelTimer("query-expire")
 end
 
@@ -543,27 +586,36 @@ local function GetButtonSlot(button)
     if not FrameCanBeUsed(button) then return nil end
     -- The first assignment provider is authoritative. Never search stale alternate
     -- fields for a matching spell after the current page has changed.
-    if type(button.GetPagedID) == "function" then
-        local ok, value = pcall(button.GetPagedID, button)
+    local getPagedID, pagedKnown = ReadMember(button, "GetPagedID")
+    if not pagedKnown then return nil end
+    if getPagedID ~= nil then
+        if type(getPagedID) ~= "function" then return nil end
+        local ok, value = pcall(getPagedID, button)
         if not ok or not IsAccessible(value) then return nil end
         if value ~= nil then return SafeID(value) end
     end
-    if type(button.GetAction) == "function" then
-        local ok, actionType, value = pcall(button.GetAction, button)
+    local getAction, actionMethodKnown = ReadMember(button, "GetAction")
+    if not actionMethodKnown then return nil end
+    if getAction ~= nil then
+        if type(getAction) ~= "function" then return nil end
+        local ok, actionType, value = pcall(getAction, button)
         if not ok or not IsAccessible(actionType) or not IsAccessible(value) then return nil end
         if type(actionType) == "number" then return SafeID(actionType) end
         if actionType ~= nil then
             return actionType == "action" and SafeID(value) or nil
         end
     end
-    local action = button.action
-    if not IsAccessible(action) then return nil end
+    local action, actionKnown = ReadMember(button, "action")
+    if not actionKnown then return nil end
     if action ~= nil then return SafeID(action) end
-    local stateAction = button._state_action
-    if not IsAccessible(stateAction) then return nil end
+    local stateAction, stateActionKnown = ReadMember(button, "_state_action")
+    if not stateActionKnown then return nil end
     if stateAction ~= nil then return SafeID(stateAction) end
-    if type(button.GetAttribute) == "function" then
-        local ok, value = pcall(button.GetAttribute, button, "action")
+    local getAttribute, attributeKnown = ReadMember(button, "GetAttribute")
+    if not attributeKnown then return nil end
+    if getAttribute ~= nil then
+        if type(getAttribute) ~= "function" then return nil end
+        local ok, value = pcall(getAttribute, button, "action")
         if ok then return SafeID(value) end
     end
     return nil
@@ -604,9 +656,14 @@ end
 
 local function GetRenderTarget(frame)
     if not FrameCanBeUsed(frame) then return nil end
-    local iconFrame = frame.Icon
-    if FrameCanBeUsed(iconFrame) and type(iconFrame.GetObjectType) == "function" then
-        local ok, objectType = pcall(iconFrame.GetObjectType, iconFrame)
+    local iconFrame, iconKnown = ReadMember(frame, "Icon")
+    if not iconKnown then return nil end
+    if FrameCanBeUsed(iconFrame) then
+        local getObjectType, objectTypeKnown = ReadMember(iconFrame, "GetObjectType")
+        if not objectTypeKnown then return nil end
+        if getObjectType == nil then return frame end
+        if type(getObjectType) ~= "function" then return nil end
+        local ok, objectType = pcall(getObjectType, iconFrame)
         if ok and SafeString(objectType) == "Frame" then
             return iconFrame
         end
@@ -617,87 +674,96 @@ end
 local function GetFrameState(frame)
     local state = R.frameState[frame]
     if not state then
-        state = { alert = nil, shown = false, animating = false, geometryReady = false, renderTarget = nil, sizeHookTargets = nil, isCDM = false }
+        state = {
+            alert = nil,
+            shown = false,
+            animating = false,
+            geometryReady = false,
+            geometryToken = nil,
+            renderTarget = nil,
+            sizeHookTargets = nil,
+            isCDM = false,
+        }
         R.frameState[frame] = state
     end
     return state
 end
 
-local function RefreshAlertGeometry(frame, state)
-    if InCombat() then
-        state.geometryReady = false
-        R.needsGeometry = true
-        return false
-    end
-    if not FrameCanBeUsed(state.alert) then
-        state.geometryReady = false
-        R.needsGeometry = true
-        return false
-    end
-    local target = GetRenderTarget(frame)
-    if not target then
-        state.geometryReady = false
-        R.needsGeometry = true
-        return false
-    end
+local function MarkGeometryDirty(state)
+    state.geometryReady = false
+    R.needsGeometry = true
+    return false
+end
 
-    if state.renderTarget ~= target and type(state.alert.SetParent) == "function" then
-        if not pcall(state.alert.SetParent, state.alert, target) then
-            state.geometryReady = false
-            R.needsGeometry = true
-            return false
-        end
+local function RefreshAlertGeometry(frame, state, resolvedTarget)
+    if InCombat() then return MarkGeometryDirty(state) end
+    if not FrameCanBeUsed(state.alert) then return MarkGeometryDirty(state) end
+
+    local target = resolvedTarget or GetRenderTarget(frame)
+    if not FrameCanBeUsed(target) then return MarkGeometryDirty(state) end
+
+    if state.renderTarget ~= target and not CallMethod(state.alert, "SetParent", target) then
+        return MarkGeometryDirty(state)
     end
 
     local width, height = 0, 0
-    if type(target.GetSize) == "function" then
-        local ok, w, h = pcall(target.GetSize, target)
-        if ok then
-            width = SafeNumber(w) or 0
-            height = SafeNumber(h) or 0
+    local getSize, sizeKnown = ReadMember(target, "GetSize")
+    if not sizeKnown then return MarkGeometryDirty(state) end
+    if getSize ~= nil then
+        if type(getSize) ~= "function" then return MarkGeometryDirty(state) end
+        local ok, w, h = pcall(getSize, target)
+        if not ok or not IsAccessible(w) or not IsAccessible(h) then
+            return MarkGeometryDirty(state)
         end
+        width = SafeNumber(w) or 0
+        height = SafeNumber(h) or 0
     end
 
-    local geometryOK = pcall(state.alert.ClearAllPoints, state.alert)
+    if not CallMethod(state.alert, "ClearAllPoints") then return MarkGeometryDirty(state) end
     if width > 0 and height > 0 then
-        geometryOK = pcall(state.alert.SetSize, state.alert, width * DB.glowScale, height * DB.glowScale) and geometryOK
-        geometryOK = pcall(state.alert.SetPoint, state.alert, "CENTER", target, "CENTER", 0, 0) and geometryOK
-    else
-        geometryOK = pcall(state.alert.SetAllPoints, state.alert, target) and geometryOK
+        if not CallMethod(state.alert, "SetSize", width * DB.glowScale, height * DB.glowScale) then
+            return MarkGeometryDirty(state)
+        end
+        if not CallMethod(state.alert, "SetPoint", "CENTER", target, "CENTER", 0, 0) then
+            return MarkGeometryDirty(state)
+        end
+    elseif not CallMethod(state.alert, "SetAllPoints", target) then
+        return MarkGeometryDirty(state)
     end
 
-    if geometryOK and type(target.GetFrameLevel) == "function" and type(state.alert.SetFrameLevel) == "function" then
-        local ok, level = pcall(target.GetFrameLevel, target)
-        level = ok and SafeNumber(level) or nil
-        if level then
-            geometryOK = pcall(state.alert.SetFrameLevel, state.alert, level + 20)
-        end
+    local getFrameLevel, levelKnown = ReadMember(target, "GetFrameLevel")
+    if not levelKnown or type(getFrameLevel) ~= "function" then
+        return MarkGeometryDirty(state)
+    end
+    local levelOK, level = pcall(getFrameLevel, target)
+    level = levelOK and SafeNumber(level) or nil
+    if not level or not CallMethod(state.alert, "SetFrameLevel", level + 20) then
+        return MarkGeometryDirty(state)
     end
 
-    if geometryOK and type(target.HookScript) == "function" then
-        local hookedTargets = state.sizeHookTargets
-        if not hookedTargets then
-            hookedTargets = NewWeakKeyTable()
-            state.sizeHookTargets = hookedTargets
-        end
-        if not hookedTargets[target] then
-            local hooked = pcall(target.HookScript, target, "OnSizeChanged", function()
-                if not RuntimeEnabled() then return end
-                state.geometryReady = false
-                RefreshAlertGeometry(frame, state)
-            end)
-            if hooked then hookedTargets[target] = true else geometryOK = false end
-        end
+    local hookScript, hookKnown = ReadMember(target, "HookScript")
+    if not hookKnown or type(hookScript) ~= "function" then
+        return MarkGeometryDirty(state)
     end
-
-    if not geometryOK then
-        state.geometryReady = false
-        R.needsGeometry = true
-        return false
+    local hookedTargets = state.sizeHookTargets
+    if not hookedTargets then
+        hookedTargets = NewWeakKeyTable()
+        state.sizeHookTargets = hookedTargets
+    end
+    if not hookedTargets[target] then
+        local hooked = pcall(hookScript, target, "OnSizeChanged", function()
+            state.geometryReady = false
+            R.needsGeometry = true
+            if not RuntimeEnabled() then return end
+            RefreshAlertGeometry(frame, state)
+        end)
+        if not hooked then return MarkGeometryDirty(state) end
+        hookedTargets[target] = true
     end
 
     state.renderTarget = target
     state.geometryReady = true
+    state.geometryToken = R.geometryToken
     return true
 end
 
@@ -706,11 +772,17 @@ local function EnsureAlert(frame)
     local state = GetFrameState(frame)
     if state.alert then
         if not FrameCanBeUsed(state.alert) then
-            state.geometryReady = false
-            R.needsGeometry = true
+            MarkGeometryDirty(state)
             return nil
         end
-        if not state.geometryReady and not RefreshAlertGeometry(frame, state) then return nil end
+        local target = GetRenderTarget(frame)
+        if not target then
+            MarkGeometryDirty(state)
+            return nil
+        end
+        if state.geometryToken ~= R.geometryToken then MarkGeometryDirty(state) end
+        if state.renderTarget ~= target then MarkGeometryDirty(state) end
+        if not state.geometryReady and not RefreshAlertGeometry(frame, state, target) then return nil end
         return state.alert
     end
     if InCombat() then R.needsRescan = true; return nil end
@@ -729,21 +801,19 @@ local function EnsureAlert(frame)
     state.shown = false
     state.animating = false
     state.geometryReady = false
-    pcall(alert.Hide, alert)
-    local geometryReady = RefreshAlertGeometry(frame, state)
+    CallMethod(alert, "Hide")
+    local geometryReady = RefreshAlertGeometry(frame, state, target)
     return geometryReady and alert or nil
 end
 
 local function StopAnimation(animation)
-    if FrameCanBeUsed(animation) and type(animation.Stop) == "function" then pcall(animation.Stop, animation) end
+    if not FrameCanBeUsed(animation) then return false end
+    return CallMethod(animation, "Stop")
 end
 
 local function PlayAnimation(animation)
-    if FrameCanBeUsed(animation) and type(animation.Play) == "function" then
-        local ok = pcall(animation.Play, animation)
-        return ok
-    end
-    return false
+    if not FrameCanBeUsed(animation) then return false end
+    return CallMethod(animation, "Play")
 end
 
 local function DeferHide(state)
@@ -760,10 +830,12 @@ local function HideAlert(state)
     local alert = state.alert
     if not FrameCanBeUsed(alert) then DeferHide(state); return end
 
-    alert.animationPlaying = false
-    StopAnimation(alert.ProcStartAnim)
-    StopAnimation(alert.ProcLoop)
-    if pcall(alert.Hide, alert) then
+    WriteMember(alert, "animationPlaying", false)
+    local startAnimation, startKnown = ReadMember(alert, "ProcStartAnim")
+    local loopAnimation, loopKnown = ReadMember(alert, "ProcLoop")
+    if startKnown then StopAnimation(startAnimation) end
+    if loopKnown then StopAnimation(loopAnimation) end
+    if CallMethod(alert, "Hide") then
         state.shown = false
         R.pendingHides[state] = nil
     else
@@ -803,19 +875,28 @@ local function ShowFrameGlow(frame)
     if not alert then return end
 
     local wasShown = state.shown
-    if not wasShown and not pcall(alert.Show, alert) then return end
+    if not wasShown and not CallMethod(alert, "Show") then return end
+
+    local startAnimation, startKnown = ReadMember(alert, "ProcStartAnim")
+    local loopAnimation, loopKnown = ReadMember(alert, "ProcLoop")
+    if not startKnown or not loopKnown then
+        state.shown = true
+        state.animating = false
+        WriteMember(alert, "animationPlaying", false)
+        return
+    end
 
     local played
     if wasShown then
-        played = PlayAnimation(alert.ProcLoop) or PlayAnimation(alert.ProcStartAnim)
+        played = PlayAnimation(loopAnimation) or PlayAnimation(startAnimation)
     else
-        StopAnimation(alert.ProcLoop)
-        played = PlayAnimation(alert.ProcStartAnim) or PlayAnimation(alert.ProcLoop)
+        StopAnimation(loopAnimation)
+        played = PlayAnimation(startAnimation) or PlayAnimation(loopAnimation)
     end
 
     state.shown = true
     state.animating = played and true or false
-    alert.animationPlaying = state.animating
+    WriteMember(alert, "animationPlaying", state.animating)
     R.pendingHides[state] = nil
 end
 
@@ -891,8 +972,12 @@ local function DeepMapButtons(maxFrames)
     while current do
         count = count + 1
         if count > maxFrames then break end
-        if FrameCanBeUsed(current) and type(current.GetObjectType) == "function" then
-            local objectOK, objectType = pcall(current.GetObjectType, current)
+        if FrameCanBeUsed(current) then
+            local getObjectType, objectTypeKnown = ReadMember(current, "GetObjectType")
+            local objectOK, objectType = false, nil
+            if objectTypeKnown and type(getObjectType) == "function" then
+                objectOK, objectType = pcall(getObjectType, current)
+            end
             objectType = objectOK and SafeString(objectType) or nil
             if objectOK and (objectType == "Button" or objectType == "CheckButton") and
                IsCurrentTargetButton(current) then
@@ -908,8 +993,10 @@ end
 -- Narrow source-coupled adapter: ordinary configured identity only. GetSpellID
 -- can prefer managed aura data in 12.1.5, so it is deliberately not queried here.
 local function CDMFrameMatches(frame)
-    if not FrameCanBeUsed(frame) or type(frame.GetBaseSpellID) ~= "function" then return nil end
-    local ok, spellID = pcall(frame.GetBaseSpellID, frame)
+    if not FrameCanBeUsed(frame) then return nil end
+    local getBaseSpellID, methodKnown = ReadMember(frame, "GetBaseSpellID")
+    if not methodKnown or type(getBaseSpellID) ~= "function" then return nil end
+    local ok, spellID = pcall(getBaseSpellID, frame)
     if not ok or not IsAccessible(spellID) then return nil end
     spellID = SafeID(spellID)
     return spellID and IsTargetFamilySpell(spellID, true) or false
@@ -962,7 +1049,13 @@ local function HookCDMItem(frame)
     if not hooked then hooked = {}; R.cdmItemHooks[frame] = hooked end
     for i = 1, #CDM_ITEM_HOOK_METHODS do
         local name = CDM_ITEM_HOOK_METHODS[i]
-        if not hooked[name] and type(frame[name]) == "function" then
+        local method, methodKnown = ReadMember(frame, name)
+        if not methodKnown then
+            HideFrameGlow(frame)
+            R.needsRescan = true
+            return
+        end
+        if not hooked[name] and type(method) == "function" then
             local clear = name == "ClearCooldownID" or name == "ResetCooldownData"
             local ok = pcall(hooksecurefunc, frame, name, function(item)
                 if not RuntimeEnabled() or not DB.cdm then return end
@@ -980,10 +1073,12 @@ local CDM_VIEWER_NAMES = {
 
 local function EnumerateCDMViewer(viewer, seen)
     if not FrameCanBeUsed(viewer) then return false end
-    local pool = viewer.itemFramePool
-    if not IsReadableTable(pool) or type(pool.EnumerateActive) ~= "function" then return false end
+    local pool, poolKnown = ReadMember(viewer, "itemFramePool")
+    if not poolKnown or not IsReadableTable(pool) then return false end
+    local enumerateActive, enumerateKnown = ReadMember(pool, "EnumerateActive")
+    if not enumerateKnown or type(enumerateActive) ~= "function" then return false end
     return pcall(function()
-        for item in pool:EnumerateActive() do
+        for item in enumerateActive(pool) do
             if not IsAccessible(item) then error("Unavailable viewer item") end
             if item then
                 seen[item] = true
@@ -1019,8 +1114,11 @@ local function ReconcileCDMFrames()
             allReadable = false
         else
             foundViewer = true
-            if FrameCanBeUsed(viewer) and type(hooksecurefunc) == "function" and
-               not R.cdmViewerHooks[viewer] and type(viewer.OnAcquireItemFrame) == "function" then
+            local acquireMethod, acquireKnown = ReadMember(viewer, "OnAcquireItemFrame")
+            if not acquireKnown then
+                allReadable = false
+            elseif FrameCanBeUsed(viewer) and type(hooksecurefunc) == "function" and
+               not R.cdmViewerHooks[viewer] and type(acquireMethod) == "function" then
                 -- Mixins are copied into frames. Hook the actual instance, including
                 -- instances created before this addon was loaded.
                 local hooked = pcall(hooksecurefunc, viewer, "OnAcquireItemFrame", function(_, item)
@@ -1077,15 +1175,41 @@ local function QueryOverlayState()
 
     local readable = 0
     local candidates = #R.signalFamilyList
+    local preferred = SafeID(R.queryHintSpellID)
+    if not preferred or not R.signalFamily[preferred] then
+        preferred = SafeID(R.lastQuerySpellID)
+        if preferred and not R.signalFamily[preferred] then preferred = nil end
+    end
+
+    local function QueryCandidate(spellID)
+        local ok, overlayed = pcall(C_SpellActivationOverlay.IsSpellOverlayed, spellID)
+        if not ok or not IsAccessible(overlayed) or type(overlayed) ~= "boolean" then
+            return false, false
+        end
+        readable = readable + 1
+        return overlayed, true
+    end
+
+    if preferred then
+        local overlayed = QueryCandidate(preferred)
+        if overlayed then
+            R.overlayQueryReadable = readable
+            R.overlayQueryCandidates = candidates
+            R.overlayQueryAuthoritative = true
+            R.queryHintSpellID = preferred
+            return true, true, preferred
+        end
+    end
+
     for i = 1, candidates do
         local spellID = R.signalFamilyList[i]
-        local ok, overlayed = pcall(C_SpellActivationOverlay.IsSpellOverlayed, spellID)
-        if ok and IsAccessible(overlayed) and type(overlayed) == "boolean" then
-            readable = readable + 1
+        if spellID ~= preferred then
+            local overlayed = QueryCandidate(spellID)
             if overlayed then
                 R.overlayQueryReadable = readable
                 R.overlayQueryCandidates = candidates
                 R.overlayQueryAuthoritative = true
+                R.queryHintSpellID = spellID
                 return true, true, spellID
             end
         end
@@ -1094,6 +1218,7 @@ local function QueryOverlayState()
     R.overlayQueryReadable = readable
     R.overlayQueryCandidates = candidates
     R.overlayQueryAuthoritative = candidates > 0 and readable == candidates
+    R.queryHintSpellID = nil
     return false, R.overlayQueryAuthoritative
 end
 
@@ -1189,6 +1314,7 @@ local function HandleOverlayShow(spellID)
     spellID = SafeID(spellID)
 
     if IsRelevantSignal(spellID) then
+        R.queryHintSpellID = spellID
         SetEventSignal(spellID)
         ReconcileGlow("overlay-show")
         QueueReconcile("overlay-show-delayed", OVERLAY_RECONCILE_DELAY)
@@ -1204,28 +1330,34 @@ local function HandleOverlayHide(spellID)
     spellID = SafeID(spellID)
 
     if IsRelevantSignal(spellID) then
+        if R.queryHintSpellID == spellID then R.queryHintSpellID = nil end
         ClearEventSignal(spellID)
         ReconcileGlow("overlay-hide")
     end
     QueueReconcile("overlay-hide-delayed", OVERLAY_RECONCILE_DELAY)
 end
 
-local function PrimeTrackedAlerts()
+local function PrimeTrackedAlerts(forceGeometry)
+    if forceGeometry then R.geometryToken = {} end
     if InCombat() then R.needsGeometry = true; return end
     local complete = true
+
+    local function PrimeFrame(frame, required)
+        local state = R.frameState[frame]
+        if required or (state and state.alert) then
+            if not EnsureAlert(frame) then complete = false end
+        end
+    end
+
     for button in pairs(R.knownButtons) do
         if IsAccessible(button) then
-            if R.trackedButtons[button] and not EnsureAlert(button) then complete = false end
-            local state = R.frameState[button]
-            if state and not RefreshAlertGeometry(button, state) then complete = false end
+            PrimeFrame(button, R.trackedButtons[button] == true)
+        else
+            complete = false
         end
     end
     for item in pairs(R.cdmFrames) do
-        if IsAccessible(item) then
-            if not EnsureAlert(item) then complete = false end
-            local state = R.frameState[item]
-            if state and not RefreshAlertGeometry(item, state) then complete = false end
-        end
+        if IsAccessible(item) then PrimeFrame(item, true) else complete = false end
     end
     R.needsGeometry = not complete
 end
@@ -1435,7 +1567,7 @@ local function ApplyOptionEffects(key, value)
     elseif key == "cdm" then
         ReconcileCDMFrames()
     elseif key == "glowScale" then
-        if RuntimeEnabled() then PrimeTrackedAlerts() end
+        if RuntimeEnabled() then PrimeTrackedAlerts(true) end
     elseif key == "debug" and SDG.DebugUI then
         if value then SDG.DebugUI:Show() else SDG.DebugUI:Hide() end
     end

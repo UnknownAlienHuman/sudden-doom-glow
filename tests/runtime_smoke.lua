@@ -73,6 +73,7 @@ local function NewFrame(name, parent, template)
         height = 40,
         frameLevel = 1,
         scripts = {},
+        hooks = {},
         events = {},
         attributes = {},
     }
@@ -83,6 +84,7 @@ local function NewFrame(name, parent, template)
     function frame:IsEventRegistered(event) return self.events[event] == true end
     function frame:RegisterUnitEvent(event) self.events[event] = true end
     function frame:SetScript(script, callback) self.scripts[script] = callback end
+    function frame:HookScript(script, callback) self.hooks[script] = callback end
     function frame:GetName() return self.name end
     function frame:GetObjectType() return "Button" end
     function frame:IsForbidden() return false end
@@ -91,6 +93,7 @@ local function NewFrame(name, parent, template)
     function frame:SetAllPoints(relative) AssertOutsideCombat(self, "SetAllPoints"); self.allPoints = relative or true end
     function frame:ClearAllPoints() AssertOutsideCombat(self, "ClearAllPoints"); self.point = nil; self.allPoints = nil end
     function frame:SetPoint(...) AssertOutsideCombat(self, "SetPoint"); self.point = { ... } end
+    function frame:SetParent(newParent) AssertOutsideCombat(self, "SetParent"); self.parent = newParent end
     function frame:SetFrameLevel(level) AssertOutsideCombat(self, "SetFrameLevel"); self.frameLevel = level end
     function frame:GetFrameLevel() return self.frameLevel end
     function frame:SetFrameStrata(value) AssertOutsideCombat(self, "SetFrameStrata"); self.frameStrata = value end
@@ -223,7 +226,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.5" end end }
+C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.6" end end }
 
 local baseMap = { [1242174] = 47541 }
 local overrideMap = { [47541] = 1242174 }

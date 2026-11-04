@@ -15,7 +15,7 @@ def metadata(name: str) -> str:
 interface = int(metadata("Interface"))
 assert interface == 120105, f"unexpected Retail 12.1.5 interface: {interface}"
 version = metadata("Version")
-assert version == "1.4.5", f"unexpected addon version: {version!r}"
+assert version == "1.4.6", f"unexpected addon version: {version!r}"
 assert metadata("OptionalDeps") == "Blizzard_CooldownViewer"
 assert metadata("SavedVariables") == "SuddenDoomGlowDB"
 
@@ -104,6 +104,14 @@ assert access_gate and "pcall(canaccessvalue, value)" in access_gate.group(1)
 table_gate = re.search(r"local function IsReadableTable\(value\)(.*?)\nend", core, re.DOTALL)
 assert table_gate and "pcall(canaccesstable, value)" in table_gate.group(1)
 
+member_gate = re.search(r"local function ReadMember\(container, key\)(.*?)\nend", core, re.DOTALL)
+assert member_gate
+body = member_gate.group(1)
+assert 0 <= body.find("IsAccessible(container)") < body.find("ReadIndex"), (
+    "foreign member lookup must be access-gated before indexing"
+)
+assert "pcall(ReadIndex, container, key)" in body
+
 merge_defaults = re.search(r"local function MergeNumericDefaults\(destination, defaults\)(.*?)\nend", core, re.DOTALL)
 assert merge_defaults and "#result >= MAX_CONFIGURED_SPELL_IDS" in merge_defaults.group(1)
 
@@ -164,11 +172,30 @@ assert 'pcall(hooksecurefunc, viewer, "OnAcquireItemFrame"' in core
 assert "if ok then hooked[name] = true end" in core
 assert "if hooked then R.cdmViewerHooks[viewer] = true end" in core
 
-geometry = re.search(r"local function RefreshAlertGeometry\(frame, state\)(.*?)\nend", core, re.DOTALL)
+geometry = re.search(
+    r"local function RefreshAlertGeometry\(frame, state, resolvedTarget\)(.*?)\nend",
+    core,
+    re.DOTALL,
+)
 assert geometry
 body = geometry.group(1)
-assert "state.sizeHookTargets" in body and "pcall(target.HookScript" in body
-assert body.count("return false") >= 3, "geometry failures must stay dirty rather than reuse stale readiness"
+assert "state.sizeHookTargets" in body and 'ReadMember(target, "HookScript")' in body
+assert body.count("MarkGeometryDirty(state)") >= 6, (
+    "geometry failures must stay dirty rather than reuse stale readiness"
+)
+assert 'ReadMember(target, "GetFrameLevel")' in body
+assert "state.geometryToken = R.geometryToken" in body
+
+prime_geometry = re.search(r"local function PrimeTrackedAlerts\(forceGeometry\)(.*?)\nend", core, re.DOTALL)
+assert prime_geometry
+body = prime_geometry.group(1)
+assert "if forceGeometry then R.geometryToken = {} end" in body
+assert "RefreshAlertGeometry(" not in body, (
+    "stable priming must delegate to idempotent EnsureAlert instead of repeating geometry mutations"
+)
+
+query_overlay = re.search(r"local function QueryOverlayState\(\)(.*?)\nend", core, re.DOTALL)
+assert query_overlay and "R.queryHintSpellID" in query_overlay.group(1)
 
 # Reassignment callbacks must conservatively hide an unreadable current assignment.
 action_callback = re.search(

@@ -19,7 +19,7 @@ The complete `70688 → 70783` delta does not change the ActionBar, Spell Activa
 
 The generated Cooldown Viewer contract defines synchronous data-loaded, spell-override, and table-hotfix events. Blizzard Settings exposes `RegisterAddOnSetting`, and `SettingMixin` emits value callbacks after the authoritative field write.
 
-All secret-capable values are gated before comparison, type/nil tests, conversion, formatting, indexing, storage, logging, or deferral.
+All secret-capable values are gated before comparison, type/nil tests, conversion, formatting, indexing, storage, logging, or deferral. Foreign object/table member discovery is also an access operation: the container/table is gated, indexing is isolated with `pcall`, the returned member is gated, and invocation has its own error boundary.
 
 ## Private implementation boundaries
 
@@ -31,6 +31,7 @@ The addon creates an addon-owned child from `ActionButtonSpellAlertTemplate` and
 
 The selected source supplies four viewer instances, active `itemFramePool` objects, `OnAcquireItemFrame`, and item lifecycle methods (`SetCooldownID`, `SetOverrideSpell`, `ClearCooldownID`, `ResetCooldownData`). The adapter:
 
+- never reads a viewer, pool, item, or method through an unguarded foreign member access;
 - hooks actual instances once and only outside combat;
 - treats post-hook installation as a fallible foreign boundary, records success only after the hook is installed, and retries only on a later lifecycle pass;
 - enumerates pools only for bounded setup/recovery;
@@ -47,9 +48,9 @@ The selected source supplies four viewer instances, active `itemFramePool` objec
 
 SavedVariables accept at most 32 configured target IDs and 32 configured signal IDs. Runtime replacement expansion has a separate 128-ID cap per resolved family. Explicit configured signal aliases are inserted first so learned target variants cannot evict proc-authority candidates.
 
-Known buttons maintain one weak reverse action-slot index. `ACTIONBAR_SLOT_CHANGED(slot > 0)` updates only that slot's current owners immediately and in one coalesced targeted retry. Page, modifier, vehicle, override, macro, and broad slot invalidations share one complete next-frame pass. A required post-combat structural rescan replaces, rather than follows, a duplicate complete assignment pass. Proc-state queries remain independent from assignment events.
+Known buttons maintain one weak reverse action-slot index. `ACTIONBAR_SLOT_CHANGED(slot > 0)` updates only that slot's current owners immediately and in one coalesced targeted retry. Page, modifier, vehicle, override, macro, and broad slot invalidations share one complete next-frame pass. A required post-combat structural rescan replaces, rather than follows, a duplicate complete assignment pass. Proc-state queries remain independent from assignment events. Relevant SHOW payloads and the last positive candidate are ordering hints only; they reduce active-path reads but never authorize OFF before the complete readable candidate set is false.
 
-Alert geometry is complete only after parent, anchors/size, frame level, and the current render target's size hook succeed. A temporary access or mutation failure remains dirty; prior geometry readiness is not reused as proof of completion.
+Alert geometry is complete only after foreign-member discovery, parent, anchors/size, frame-level read/write, and the current render target's size hook succeed. A temporary access, lookup, or mutation failure remains dirty. Global geometry settings replace a runtime generation token, so a surface inaccessible during the change must reconcile before reusing readiness. Stable lifecycle scans do not repeat completed geometry mutations.
 
 ## External implementation evidence
 
@@ -59,6 +60,7 @@ Current donor implementations are pinned and summarized in [`DONOR_REVIEW.md`](D
 - ElvUI confirms `ElvUI_Bar<bar>Button<slot>` names;
 - Dominos confirms mixed `DominosActionButtonN` and `MultiBar*ActionButtonN` families;
 - WeakAuras and LibCustomGlow confirm keyed visual ownership and exact terminal cleanup.
+- `UnknownAlienHuman/interrupt-glow` confirms that current object access must be rechecked at the exact visual/member boundary and that denied presentation resumes only on explicit lifecycle recovery.
 
 No donor private registry is treated as a public API, and LibCustomGlow is intentionally not embedded.
 

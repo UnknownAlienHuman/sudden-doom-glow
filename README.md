@@ -2,7 +2,7 @@
 
 Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto matching Death Coil, Epidemic, replacement action buttons, and configured Blizzard Cooldown Viewer items.
 
-- **Version:** 1.4.5
+- **Version:** 1.4.6
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
 - **Current live UI source:** build `12.1.5.70783`, commit `297d7aaaa736f346b3e036f38ee088eaf7f8c07f` (checked 2026-11-04)
@@ -14,11 +14,11 @@ The TOC interface is target metadata. The addon's runtime client build has not b
 
 ## Detection and display
 
-The addon listens to synchronous Spell Activation Overlay glow events and reconciles them against `C_SpellActivationOverlay.IsSpellOverlayed`. A readable `true` can turn the glow on. OFF is authoritative only when all configured candidates are readable and false. SHOW ordering receives a short grace; unavailable query state uses a bounded event fallback. Simultaneous spell IDs remain independent.
+The addon listens to synchronous Spell Activation Overlay glow events and reconciles them against `C_SpellActivationOverlay.IsSpellOverlayed`. A readable `true` can turn the glow on. OFF is authoritative only when all configured candidates are readable and false. The relevant SHOW payload or last positive ID is queried first to shorten active-path work without weakening that OFF rule. SHOW ordering receives a short grace; unavailable query state uses a bounded event fallback. Simultaneous spell IDs remain independent.
 
 Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. A nonzero slot change refreshes only buttons currently indexed to that slot, both immediately and in one coalesced next-frame retry. Broad page, modifier, vehicle, override, macro, and slot invalidations share one complete pass. Action assignment events do not independently query proc state. Macro text is not searched to infer a castable spell.
 
-The addon owns the glow state and its frame metadata. Alert construction, geometry repair, Cooldown Viewer pool discovery, and new lifecycle hooks are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances, recovers from the public data-ready event, access-gates external pool tables, retries failed foreign hook installation only on later lifecycle passes, and uses each item's configured base spell ID. Partial observations never authorize pruning. Current Bartender4, Dominos, ElvUI, WeakAuras/LibCustomGlow, and LibActionButton evidence is recorded in the [donor review](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/DONOR_REVIEW.md); donor code is not treated as API authority. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
+The addon owns the glow state and its frame metadata. Foreign frame/table members are access-gated and read behind error boundaries before use. Alert construction, geometry repair, Cooldown Viewer pool discovery, and new lifecycle hooks are deferred out of combat. Global scale changes replace one geometry generation token, so a surface that was inaccessible during the change cannot reuse stale readiness later. Stable rescans do not rewrite already completed geometry. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances, recovers from the public data-ready event, access-gates external pool tables, retries failed foreign hook installation only on later lifecycle passes, and uses each item's configured base spell ID. Partial observations never authorize pruning. Current Bartender4, Dominos, ElvUI, WeakAuras/LibCustomGlow, LibActionButton, and sibling `interrupt-glow` evidence is recorded in the [donor review](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/DONOR_REVIEW.md); donor code is not treated as API authority. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
 
 ## Settings
 
@@ -73,7 +73,7 @@ Build the deterministic install archive with:
 python scripts/package.py
 ```
 
-The default output is `dist/SuddenDoomGlow-1.4.5.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
+The default output is `dist/SuddenDoomGlow-1.4.6.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
 
 ## Install
 

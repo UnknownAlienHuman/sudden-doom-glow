@@ -10,6 +10,7 @@ local actionCallbacks = {}
 local queryCalls = 0
 local cdmEnumerations = 0
 local unitEventRegistrations = 0
+local geometryMutations = 0
 local unpackValues = table.unpack or unpack
 local secretValue = { secret = true }
 
@@ -63,15 +64,36 @@ local function NewFrame(name, template)
     end
     function frame:GetObjectType() return "Button" end
     function frame:GetSize() return self.width, self.height end
-    function frame:SetSize(w, h) assert(not inCombat, "SetSize in combat"); self.width, self.height = w, h end
-    function frame:ClearAllPoints() assert(not inCombat, "ClearAllPoints in combat") end
-    function frame:SetPoint() assert(not inCombat, "SetPoint in combat") end
-    function frame:SetAllPoints() assert(not inCombat, "SetAllPoints in combat") end
-    function frame:SetParent(parent) assert(not inCombat, "SetParent in combat"); self.parent = parent end
-    function frame:GetFrameLevel() return self.frameLevel end
+    function frame:SetSize(w, h)
+        assert(not inCombat, "SetSize in combat")
+        geometryMutations = geometryMutations + 1
+        self.width, self.height = w, h
+    end
+    function frame:ClearAllPoints()
+        assert(not inCombat, "ClearAllPoints in combat")
+        geometryMutations = geometryMutations + 1
+    end
+    function frame:SetPoint()
+        assert(not inCombat, "SetPoint in combat")
+        geometryMutations = geometryMutations + 1
+    end
+    function frame:SetAllPoints()
+        assert(not inCombat, "SetAllPoints in combat")
+        geometryMutations = geometryMutations + 1
+    end
+    function frame:SetParent(parent)
+        assert(not inCombat, "SetParent in combat")
+        geometryMutations = geometryMutations + 1
+        self.parent = parent
+    end
+    function frame:GetFrameLevel()
+        if self.failGetFrameLevel then error("GetFrameLevel failed") end
+        return self.frameLevel
+    end
     function frame:SetFrameLevel(level)
         assert(not inCombat, "SetFrameLevel in combat")
         if self.failSetFrameLevel then error("SetFrameLevel failed") end
+        geometryMutations = geometryMutations + 1
         self.frameLevel = level
     end
     function frame:GetPagedID()
@@ -153,7 +175,7 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.5" or nil end }
+C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.6" or nil end }
 local currentOverrideSpellID = 1242174
 C_Spell = {
     GetBaseSpell = function(spellID)
@@ -300,6 +322,28 @@ actionCallbacks["ActionButton.OnActionChanged"].callback(nil, ActionButton1)
 ActionButton1.gateLog = nil
 assert(gateLog[1] == "access" and gateLog[2] == "forbidden", "object gates are in the wrong order")
 
+-- Foreign member lookup is itself an access boundary. A hostile metatable must
+-- not escape the action-button adapter before the current assignment is read.
+local hostileButton = setmetatable({ raiseTableAccess = false, tableAccessible = true }, {
+    __index = function(_, key)
+        if key == "CanBeAccessedInContext" then return function() return true end end
+        if key == "IsForbidden" then return function() return false end end
+        error("foreign action-button member read")
+    end,
+})
+assert(pcall(actionCallbacks["ActionButton.OnActionChanged"].callback, nil, hostileButton),
+    "foreign action-button member read escaped the adapter boundary")
+
+-- A relevant SHOW payload is the best first query candidate. This preserves
+-- authoritative all-false reconciliation while avoiding a linear active scan.
+overlayState[450932] = true
+queryCalls = 0
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 450932)
+assert(queryCalls == 1, "relevant SHOW payload was not queried first")
+overlayState[450932] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 450932)
+Advance(0.3)
+
 overlayState[47541] = true
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
 local preAccessState = assert(R.frameState[ActionButton1])
@@ -430,6 +474,15 @@ assert(dormantState.geometryReady and not R.needsGeometry,
 assert(iconTarget.hooks.OnSizeChanged,
     "replacement render target did not receive one size-change recovery hook")
 
+iconTarget.failGetFrameLevel = true
+assert(SDG:SetOption("glowScale", 1.55))
+assert(R.needsGeometry and not dormantState.geometryReady,
+    "failed frame-level read was incorrectly marked complete")
+iconTarget.failGetFrameLevel = nil
+Fire("PLAYER_REGEN_ENABLED")
+assert(dormantState.geometryReady and not R.needsGeometry,
+    "frame-level read recovery did not complete")
+
 dormantAlert.failSetFrameLevel = true
 assert(SDG:SetOption("glowScale", 1.6))
 assert(R.needsGeometry and not dormantState.geometryReady,
@@ -438,6 +491,33 @@ dormantAlert.failSetFrameLevel = nil
 Fire("PLAYER_REGEN_ENABLED")
 assert(dormantState.geometryReady and not R.needsGeometry,
     "frame-level recovery did not complete")
+
+-- A new render target invalidates cached geometry even when the old surface was
+-- complete; a stable rescan must not repeat already completed mutations.
+local replacementTarget = NewFrame("ActionButton2ReplacementIcon")
+function replacementTarget:GetObjectType() return "Frame" end
+ActionButton2.Icon = replacementTarget
+SDG:RescanButtons(false)
+assert(dormantState.renderTarget == replacementTarget and dormantAlert.parent == replacementTarget,
+    "render-target replacement reused stale geometry")
+local stableGeometryMutations = geometryMutations
+SDG:RescanButtons(false)
+assert(geometryMutations == stableGeometryMutations,
+    "stable rescan repeated completed geometry mutations")
+
+-- A global geometry change cannot be written into an inaccessible frame-keyed
+-- state. The generation token must invalidate it when access returns.
+local widthBeforeDeniedScale = dormantAlert.width
+ActionButton2.accessible = false
+assert(SDG:SetOption("glowScale", 1.7))
+assert(R.needsGeometry, "inaccessible button lost global geometry invalidation")
+ActionButton2.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(dormantState.geometryReady and dormantState.geometryToken == R.geometryToken,
+    "returned button reused a geometry generation from before access denial")
+assert(dormantAlert.width ~= widthBeforeDeniedScale
+    and dormantAlert.width == replacementTarget.width * 1.7,
+    "returned button did not apply the deferred global geometry change")
 
 -- Missing one selected viewer is incomplete evidence and cannot prune an item
 -- omitted from another readable pool during the same transition.
@@ -579,4 +659,4 @@ assert(#SuddenDoomGlowDB.targetSpellIDs == 32,
 assert(#SuddenDoomGlowDB.signalSpellIDs == 32,
     "legacy signal defaults exceeded the configured ID bound")
 
-print("runtime regression 1.4.5: PASS")
+print("runtime regression 1.4.6: PASS")

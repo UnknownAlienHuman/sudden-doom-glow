@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.6 — 2026-11-04
+
+- Treat foreign action-button, render-target, animation, Cooldown Viewer, pool, and hook-method lookup as an access-gated operation; throwing or inaccessible member reads now fail closed instead of escaping the adapter boundary.
+- Replace per-frame best-effort scale invalidation with one runtime geometry generation token, preserving global geometry changes made while a button or render target is inaccessible or combat-blocked.
+- Require successful frame-level reads as well as parent, anchor/size, frame-level write, and size-hook operations before geometry is marked ready; render-target replacement invalidates readiness even when the prior surface was complete.
+- Stop stable rescans from repeating completed geometry mutations. Recovery scans now delegate to idempotent `EnsureAlert` and mutate only missing, dirty, replaced, or generation-stale surfaces.
+- Query a relevant SHOW payload or the last positive candidate first, reducing active-path overlay reads while preserving the complete-readable-all-false OFF rule.
+- Recheck the current knowledge base, Blizzard source, and sibling `interrupt-glow` access-transition implementation; transfer only the object/member lifecycle decisions.
+- Extend focused regressions and mutation checks for hostile member reads, frame-level read failure, geometry generation across access denial, render-target replacement, stable-rescan writes, and query-hint ordering. Named-client validation remains **NOT-RUN**.
+
 ## 1.4.5 — 2026-11-04
 
 - Re-read the current engineering knowledge base at `c2a630aa186de401262663cc8568a77988be69df` and recheck the current Blizzard live source and pinned donor branch heads.

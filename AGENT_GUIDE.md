@@ -2,7 +2,7 @@
 
 ## Target and evidence
 
-- Release: `1.4.5`
+- Release: `1.4.6`
 - Target: Retail `12.1.5`; expected TOC interface `120105`
 - Knowledge base: `UnknownAlienHuman/wow-addon-engineering-kb@c2a630aa186de401262663cc8568a77988be69df`
 - KB-selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
@@ -18,6 +18,7 @@ Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, and both 
 - Never reconstruct Sudden Doom from auras, combat log, resources, cooldowns, usability, animation, visibility, errors, or timing.
 - Gate secret-capable values before nil/type checks, comparison, conversion, formatting, keys, storage, logging, or deferral.
 - Recheck current object access immediately before mutation; never cache permission.
+- Treat every foreign member lookup as an access operation: gate the object/table, read behind `pcall`, gate the returned member, then call behind a second error boundary.
 - Revalidate the current action assignment before every show. Use `C_ActionBar.GetSpell`, then only the resolved `GetActionInfo`/`GetMacroSpell` fallback. Never parse macro text.
 - Assignment events update assignments only. They do not become proc-state signals.
 - Keep structural work out of combat. Reuse only known buttons, observed Cooldown Viewer items, and existing addon-owned alerts during lockdown.
@@ -26,6 +27,8 @@ Read `SuddenDoomGlow.toc`, `ARCHITECTURE.md`, `docs/API_CONTRACTS.md`, and both 
 - Settings are ordinary SavedVariables fields registered through `Settings.RegisterAddOnSetting`; migration and runtime side effects remain addon-owned.
 - Configured target and signal lists are capped at 32 IDs each; resolved runtime families are capped at 128 IDs each, with configured signal aliases reserved before learned variants.
 - Maintain one reverse button-to-slot index. Nonzero slot changes stay targeted; only broad assignment invalidations may walk all known buttons.
+- Global geometry changes replace one runtime generation token. A temporarily inaccessible frame must reconcile that token before reusing cached readiness.
+- Query hints may change candidate order only. They never weaken the all-candidates-readable OFF rule.
 - Future SavedVariables schemas remain untouched and inactive.
 - The addon table passed as the second TOC vararg is the only shared Lua namespace. Do not restore `_G.SuddenDoomGlow`.
 

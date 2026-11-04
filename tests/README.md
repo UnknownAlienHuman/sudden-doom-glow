@@ -10,6 +10,6 @@ lua5.1 tests/runtime_regression.lua Core.lua
 python3 scripts/package.py
 ```
 
-`runtime_smoke.lua` retains the broad lifecycle matrix. `runtime_regression.lua` focuses on assignment/proc separation, reverse slot-index targeting, coalesced broad invalidation, single-owner post-combat rescan, exact current Dominos button families, bounded resolved spell families, fallible foreign hook installation, geometry/render-target recovery, Cooldown Viewer readiness and partial evidence, combat structural deferral, native AddOnSetting behavior, migration/list bounds, future-schema refusal, and lazy optional UI owners.
+`runtime_smoke.lua` retains the broad lifecycle matrix. `runtime_regression.lua` focuses on assignment/proc separation, query-hint ordering, reverse slot-index targeting, coalesced broad invalidation, single-owner post-combat rescan, exact current Dominos button families, bounded resolved spell families, hostile/denied foreign member reads, fallible foreign hook installation, geometry generations, render-target replacement, stable-rescan mutation suppression, Cooldown Viewer readiness and partial evidence, combat structural deferral, native AddOnSetting behavior, migration/list bounds, future-schema refusal, and lazy optional UI owners.
 
 These are deterministic host tests. They do not establish live Retail behavior, taint safety, visual quality, hotfixed payloads, or measured performance.

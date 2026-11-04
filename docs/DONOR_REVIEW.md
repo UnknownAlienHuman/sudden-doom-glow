@@ -1,6 +1,6 @@
 # Donor implementation review
 
-Reviewed and branch-head rechecked 2026-11-04 for release 1.4.5. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
+Reviewed and branch-head rechecked 2026-11-04 for release 1.4.6. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
 
 ## Pins
 
@@ -10,6 +10,7 @@ Reviewed and branch-head rechecked 2026-11-04 for release 1.4.5. These repositor
 - Dominos: `tullamods/Dominos@6653640fe9d5106d38175ef4914c553490445ec3`
 - ElvUI: `tukui-org/ElvUI@a2512baafc0cddea42406060d73284ab7aa53887`
 - LibCustomGlow: `Stanzilla/LibCustomGlow@4f8f5c2607d7384b26df9175bb99fa3df891b015`
+- Sibling access-boundary evidence: `UnknownAlienHuman/interrupt-glow@344cbe4e7f978b95d6e4ddee12ec77517a263c60`
 
 ## Transferable decisions
 
@@ -24,6 +25,12 @@ Sudden Doom Glow already uses one addon-owned alert per observed frame, weak-key
 LibActionButton derives presentation from each button's current state/action and centralizes broad events. Dominos tracks each secure button's current `action` attribute and targets `ACTIONBAR_SLOT_CHANGED` to buttons currently owning the changed slot.
 
 Sudden Doom Glow keeps current assignment resolution authoritative and does not cache a frame as permanently representing one action.
+
+### Foreign access transitions
+
+The current `interrupt-glow` implementation treats foreign member lookup, current object permission, and the final visual mutation as separate gates. Denied visuals sleep until an explicit provider/restriction/lifecycle transition rather than retrying from a ticker.
+
+Sudden Doom Glow transfers that decision, not its module structure: action buttons, render targets, animations, Cooldown Viewer instances, pools, and hook methods are read through one access-gated member boundary. Failed reads do not become cached success, and geometry remains dirty until a later authoritative pass completes every required operation.
 
 ### Exact third-party button families
 
