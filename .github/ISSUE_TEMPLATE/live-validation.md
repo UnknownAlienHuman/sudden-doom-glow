@@ -1,5 +1,5 @@
 ---
-name: Retail 12.1 live validation
+name: Retail 12.1.5 live validation
 description: Record build/context evidence for proc, action-bar, and Cooldown Viewer behavior.
 title: "Live validation: build "
 labels: []
@@ -11,6 +11,8 @@ assignees: []
 ```text
 build=
 interface=
+addon commit/package=
+date=
 region=
 character/spec=
 ```
@@ -24,11 +26,14 @@ Cooldown Viewer layout=
 other addons=
 ```
 
-## Sudden Doom path
+## Proc path
 
 ```text
 stacks=1|2
 payloadSpellID=
+immediateQuery=
+nextFrameQuery=
+postGraceQuery=
 resolvedTargets=
 resolvedSignals=
 detection=
@@ -44,4 +49,4 @@ error=
 reproduction=
 ```
 
-Attach `/sdglow status` output and the exact Lua/taint error when applicable.
+Attach `/sdglow status` and exact Lua/taint output when applicable.

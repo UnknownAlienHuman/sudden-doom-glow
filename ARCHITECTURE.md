@@ -1,67 +1,70 @@
 # Architecture
 
-Release `1.4.1` targets Retail 12.1.5 with expected TOC interface `120105`. Source was checked on 2026-11-03 at `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`; current `live` head matches this pin. Static checks, Lua 5.1.1 syntax, and stubbed runtime smoke pass; live client behavior is **NOT-RUN**. See [API contracts](docs/API_CONTRACTS.md).
+Release `1.4.2` targets Retail 12.1.5, expected interface `120105`. The KB-selected source is `12.1.5.70688`; current live source `12.1.5.70783` was checked on 2026-11-03 and contains no changes in the source slices used here. Client behavior remains **NOT-RUN**.
 
 ## Runtime flow
 
 ```mermaid
 flowchart TD
-    Login[PLAYER_LOGIN] --> Family[Build configured spell families]
-    Family --> Mapping[Observe known buttons and current assignments]
-    Login --> Viewer[Attach Cooldown Viewer instance hooks]
-    Overlay[Overlay SHOW or HIDE] --> Arbitration[Query and event arbitration]
+    Login[PLAYER_LOGIN] --> Family[Build configured target and signal families]
+    Family --> Buttons[Observe named/current action-button assignments]
+    Login --> Viewer[Attach Cooldown Viewer lifecycle outside combat]
+    Overlay[Overlay SHOW/HIDE] --> Arbitration[Event/query arbitration]
     Query[IsSpellOverlayed] --> Arbitration
-    Override[Cooldown Viewer spell override] --> Family
+    Assignment[Action assignment event] --> Buttons
+    Override[Cooldown Viewer override/hotfix] --> Family
     Arbitration --> State[Desired glow state]
-    Mapping --> Render[Addon-owned alert]
+    Buttons --> Render[Addon-owned alert]
     Viewer --> Render
     State --> Render
-    Combat[Combat lockdown] --> Deferred[Defer structural changes]
-    Deferred --> Mapping
+    Combat[Combat lockdown] --> Deferred[One deferred structural rescan]
+    Deferred --> Buttons
+    Deferred --> Viewer
 ```
 
 ## Detection
 
-Positive overlay-query evidence is scoped to configured spell IDs. A family/configuration change triggers immediate revalidation of known button and Cooldown Viewer assignments; structural work remains deferred in combat. Owned pending hides are recovered on authoritative context events, including while the addon is disabled, without polling.
+The Spell Activation Overlay event/query pair is the sole proc authority. Synchronous SHOW/HIDE events wake reconciliation. The official query supplies current state when its caller, argument, and result are accessible. A short SHOW grace covers unresolved same-frame ordering; unavailable query state has one bounded fallback lifetime.
 
-Unreadable overlay event payloads still wake an authoritative query, and a missed ON transition is recovered on an authoritative context event. The detection authority is the Spell Activation Overlay event/query pair. `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW` and `...GLOW_HIDE` wake reconciliation; `C_SpellActivationOverlay.IsSpellOverlayed` supplies current state when its caller and inputs are allowed. The addon keeps each event spell independent, treats incomplete query evidence as unknown, and uses a bounded fallback when the query is unavailable.
+Action-bar and addon-load events update assignment ownership. Cooldown Viewer hotfix plus talent/spell invalidations drop stale override observations and rebuild mappings without forcing an OFF/ON transition. Irrelevant override events are ignored.
 
-`targetRoots` comes from defaults and SavedVariables. `targetFamily` expands configured roots with base and override relationships and explicit Cooldown Viewer override events. `signalFamily` includes configured overlay aliases used for detection. A signal alias does not by itself become an action-button target.
+## Spell identity
+
+`targetRoots` comes from SavedVariables. `targetFamily` expands roots using `C_Spell.GetBaseSpell`, `C_Spell.GetOverrideSpell`, and explicit `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` pairs. `signalFamily` contains target-family IDs plus explicitly configured overlay aliases. An alias does not become an action-button target merely because it produced an event.
 
 ## Action buttons
 
-The addon discovers buttons through known named surfaces and observed current assignments. It reads the spell in a button's current slot with `C_ActionBar.GetSpell`; an ordinary result without a spell ID can fall back to `GetActionInfo` and `GetMacroSpell`. Failed or inaccessible queries remain unknown. A button is rendered only after its current readable assignment belongs to the configured target family. One weak `trackedButtons` set owns current matches and one weak `knownButtons` set owns observed surfaces. A relevant slot event updates that slot immediately; a single coalesced next-frame pass then rechecks all known buttons to cover provider update ordering. Deep frame enumeration is manual.
+The addon observes stock buttons and supported named third-party surfaces. The current action slot is resolved from the button's authoritative provider. `C_ActionBar.GetSpell` is primary; an ordinary no-spell result may fall back to `GetActionInfo` and resolved `GetMacroSpell`.
 
-Pageable bars prepare alerts outside combat; static Blizzard multibars allocate them only for matching spells.
+A positive slot event receives one immediate targeted update. Bursty or broad invalidations collapse into one next-frame full pass over known buttons. No slot sweep, macro-body search, per-frame polling, or action-event proc query is used.
 
 ## Cooldown Viewer
 
-When enabled, the addon observes the actual four configured viewer instances, reconciles their active item pools at setup/recovery boundaries, and hooks each observed item instance's assignment/reset methods. Item identity is evaluated through `GetBaseSpellID`; `GetSpellID` can select managed aura identity and is not used for this match. Overlay events update the already tracked item set; they do not trigger pool enumeration.
+The adapter uses the public data-ready event as a recovery wake-up and observes the four selected viewer instances and their active item pools only at setup/recovery boundaries. Actual viewer/item instances are post-hooked once outside combat. Item identity uses `GetBaseSpellID`; `GetSpellID` is deliberately excluded because managed aura/linked-spell precedence can change its meaning.
 
-These viewer member names and frame pools are source-coupled implementation details. See [API contracts](docs/API_CONTRACTS.md) for exact pins and the extension boundary.
+A reset/reassignment callback can clear one item. A complete readable observation of all selected viewer pools may prune unseen items. A missing, inaccessible, or unreadable viewer/pool table makes the generation incomplete and therefore cannot authorize pruning.
 
-## Rendering and ownership
+During combat, only already observed item instances and existing alerts are refreshed. New hooks, pool enumeration, parenting, sizing, anchoring, and alert construction wait for one post-combat rescan.
 
-Weak-key tables hold addon metadata; external frames do not receive addon fields. The addon creates an alert child using Blizzard's `ActionButtonSpellAlertTemplate`, then controls its animation and visibility. This template and its named animation children are private UI implementation details, not a public extension contract.
+## Rendering
 
-Alert creation, parenting, sizing, and anchoring happen outside combat. In combat, existing addon-owned presentation is shown or hidden only. A stale or unreadable assignment cannot authorize a new button glow.
+Frame metadata lives in weak-key addon tables. The addon creates a child from `ActionButtonSpellAlertTemplate` but does not call or mutate `ActionButtonSpellAlertManager`.
 
-## Persistent data
+Show/hide is idempotent. Animation start is tracked separately from frame visibility: if an animation object is temporarily inaccessible, the visible alert remains owned and a later authoritative lifecycle refresh retries the animation without requiring a second proc edge. Inaccessible OFF transitions become owned pending hides and are recovered without polling.
 
-`SuddenDoomGlowDB` stores user settings and `schemaVersion`. Future schemas remain untouched and inactive; slash commands report that mutation is unavailable instead of echoing values from the scratch runtime defaults. Frame maps, event signals, timers, explicit current-session overrides, and resolved spell families remain runtime-only.
+## Persistence
+
+`SuddenDoomGlowDB` stores ordinary user settings and `schemaVersion`. Migrations preserve unrelated data and intentional empty spell lists. Future schemas are preserved unchanged, disable runtime mutation, and produce explicit command errors. Frames, timers, hooks, event signals, resolved families, and override observations remain runtime-only.
 
 ## Code map
 
-| Area | Main code |
+| Area | Owner |
 |---|---|
-| SavedVariables migration and options | `InitializeDB`, `GetOption`, `SetOption` in `Core.lua` |
-| Secret/access boundary | `IsAccessible`, `SafeNumber`, `FrameCanBeUsed` in `Core.lua` |
-| Spell family and override handling | `RebuildSpellFamilies`, `IsTargetFamilySpell`, `LearnExplicitOverride` in `Core.lua` |
-| Action assignment and button mapping | `GetActionSpellID`, `GetButtonSlot`, `MapNamedButtons`, `RefreshKnownButtons` in `Core.lua` |
-| Glow ownership | `GetFrameState`, `EnsureAlert`, `ShowFrameGlow`, `HideFrameGlow` in `Core.lua` |
-| Cooldown Viewer | `CDMFrameMatches`, `ReconcileCDMFrames`, `HookCDMItem` in `Core.lua` |
-| Signal arbitration | `QueryOverlayState`, `SetEventSignal`, `ReconcileGlow` in `Core.lua` |
-| Settings UI | `Options.lua` |
-| Diagnostics window and logging | `Debug.lua` |
-
-The static checker and smoke harness are described in [tests/README.md](tests/README.md). The historical [1.3.1 release note](docs/RELEASE_1.3.1.md) remains historical.
+| SavedVariables, spell families, overlay arbitration, action mapping | `Core.lua` |
+| Alert ownership and lifecycle | `Core.lua` |
+| Cooldown Viewer adapter | `Core.lua` |
+| Blizzard Settings UI | `Options.lua` |
+| Bounded diagnostics | `Debug.lua` |
+| Source evidence | `docs/API_CONTRACTS.md` |
+| Broad and focused stub regressions | `tests/runtime_smoke.lua`, `tests/runtime_regression_1_4_2.lua` |
+| Deterministic release archive | `scripts/package.py` |

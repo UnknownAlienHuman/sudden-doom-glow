@@ -55,7 +55,8 @@ local function DeferSettingsWork(openAfterward)
     if owner and not owner:IsEventRegistered("PLAYER_REGEN_ENABLED") then
         owner:RegisterEvent("PLAYER_REGEN_ENABLED")
     end
-    Print("Settings will open after combat.")
+    Print(openAfterward and "Settings will open after combat." or
+        "Settings registration deferred until combat ends.")
 end
 
 local function WriteOptionFromSetting(key, value)
@@ -66,10 +67,10 @@ local function WriteOptionFromSetting(key, value)
     return result
 end
 
-local function RegisterBoolean(key, variable, label, tooltip, defaultValue)
+local function RegisterBoolean(key, label, tooltip, defaultValue)
     local setting = _G.Settings.RegisterProxySetting(
         category,
-        variable,
+        SETTING_VARIABLES[key],
         _G.Settings.VarType.Boolean,
         label,
         defaultValue,
@@ -107,16 +108,16 @@ function SDG:RegisterSettings()
 
     category = settings.RegisterVerticalLayoutCategory(CATEGORY_NAME)
 
-    RegisterBoolean("enabled", "SuddenDoomGlow_Enabled", "Enable glow",
+    RegisterBoolean("enabled", "Enable glow",
         "Show the addon glow while Sudden Doom is active.", true)
-    RegisterBoolean("cdm", "SuddenDoomGlow_CooldownViewer", "Cooldown Viewer glow",
+    RegisterBoolean("cdm", "Cooldown Viewer glow",
         "Mirror the glow on matching Cooldown Viewer items.", true)
-    RegisterBoolean("debug", "SuddenDoomGlow_Debug", "Debug log",
+    RegisterBoolean("debug", "Debug log",
         "Show diagnostic messages in the debug window.", false)
 
     local scaleSetting = settings.RegisterProxySetting(
         category,
-        "SuddenDoomGlow_GlowScale",
+        SETTING_VARIABLES.glowScale,
         settings.VarType.Number,
         "Glow size",
         1.4,
@@ -148,7 +149,7 @@ function SDG:NotifySettingsChanged(key)
     if type(settings) ~= "table" or type(settings.NotifyUpdate) ~= "function" then return end
 
     notifyingSettings = true
-    local ok, err = pcall(settings.NotifyUpdate, variable)
+    local ok = pcall(settings.NotifyUpdate, variable)
     notifyingSettings = false
     if not ok then Print("Could not refresh the Settings control.") end
 end

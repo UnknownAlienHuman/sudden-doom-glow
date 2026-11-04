@@ -24,6 +24,7 @@ local C_AddOns = _G.C_AddOns
 local EventRegistry = _G.EventRegistry
 local hooksecurefunc = _G.hooksecurefunc
 local canaccessvalue = _G.canaccessvalue
+local canaccesstable = _G.canaccesstable
 local issecretvalue = _G.issecretvalue
 
 local CURRENT_SCHEMA = 4
@@ -109,9 +110,34 @@ local function Now()
     return GetTime and GetTime() or 0
 end
 
+-- Gate values before nil checks, comparison, conversion, formatting or logging.
+-- pcall remains an error boundary; it never grants access or declassifies data.
+local function IsAccessible(value)
+    if type(issecretvalue) == "function" and issecretvalue(value) then return false end
+    if type(canaccessvalue) == "function" then return canaccessvalue(value) end
+    return true
+end
+
+local function IsReadableTable(value)
+    if not IsAccessible(value) or type(value) ~= "table" then return false end
+    if type(canaccesstable) == "function" then
+        local readable = canaccesstable(value)
+        return IsAccessible(readable) and readable and true or false
+    end
+    return true
+end
+
+local function SafeMessage(value)
+    if not IsAccessible(value) then return nil end
+    local kind = type(value)
+    if kind ~= "string" and kind ~= "number" and kind ~= "boolean" then return nil end
+    return tostring(value)
+end
+
 local function Print(message)
-    if _G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.AddMessage then
-        _G.DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. tostring(message))
+    local text = SafeMessage(message)
+    if text and _G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.AddMessage then
+        _G.DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. text)
     end
 end
 
@@ -121,10 +147,12 @@ end
 
 local function Log(message)
     if not DB or not DB.debug then return end
+    local text = SafeMessage(message)
+    if not text then return end
     if type(SDG.LogDebug) == "function" then
-        SDG:LogDebug(tostring(message))
+        SDG:LogDebug(text)
     else
-        Print(message)
+        Print(text)
     end
 end
 
@@ -144,14 +172,6 @@ local function CountEntries(t)
     local count = 0
     for _ in pairs(t) do count = count + 1 end
     return count
-end
-
--- Access checks precede nil comparisons, coercion, indexing and arithmetic.
--- A failed read stays unknown; pcall is only an error boundary, never a secret gate.
-local function IsAccessible(value)
-    if type(issecretvalue) == "function" and issecretvalue(value) then return false end
-    if type(canaccessvalue) == "function" then return canaccessvalue(value) end
-    return true
 end
 
 local function SafeNumber(value)
@@ -178,13 +198,15 @@ local function FrameCanBeUsed(frame)
     if not IsAccessible(frame) or not frame then return false end
     local kind = type(frame)
     if kind ~= "table" and kind ~= "userdata" then return false end
-    if type(frame.IsForbidden) == "function" then
-        local ok, forbidden = pcall(frame.IsForbidden, frame)
-        if not ok or not IsAccessible(forbidden) or forbidden then return false end
-    end
+    -- Current-context access is the first object gate. It is not cached across
+    -- callbacks, combat, restriction transitions or deferred work.
     if type(frame.CanBeAccessedInContext) == "function" then
         local ok, accessible = pcall(frame.CanBeAccessedInContext, frame)
         if not ok or not IsAccessible(accessible) or not accessible then return false end
+    end
+    if type(frame.IsForbidden) == "function" then
+        local ok, forbidden = pcall(frame.IsForbidden, frame)
+        if not ok or not IsAccessible(forbidden) or forbidden then return false end
     end
     return true
 end
@@ -436,14 +458,14 @@ local function IsTargetFamilySpell(spellID, learn)
 end
 
 local function LearnExplicitOverride(baseSpellID, overrideSpellID, source)
-    if not IsAccessible(baseSpellID) or not IsAccessible(overrideSpellID) then return false end
+    if not IsAccessible(baseSpellID) or not IsAccessible(overrideSpellID) then return false, false end
     baseSpellID = SafeID(baseSpellID)
     overrideSpellID = SafeID(overrideSpellID)
-    if not baseSpellID then return false end
+    if not baseSpellID then return false, false end
 
     local normalizedBase = GetBaseSpellID(baseSpellID) or baseSpellID
     if not (R.targetRoots[normalizedBase] or R.targetFamily[normalizedBase] or R.targetFamily[baseSpellID]) then
-        return false
+        return false, false
     end
 
     if not overrideSpellID then
@@ -451,19 +473,19 @@ local function LearnExplicitOverride(baseSpellID, overrideSpellID, source)
             R.explicitOverrides[normalizedBase] = nil
             RebuildSpellFamilies()
             Log("Override removed for " .. tostring(normalizedBase) .. " (" .. tostring(source) .. ")")
-            return true
+            return true, true
         end
-        return false
+        return false, true
     end
 
     if R.explicitOverrides[normalizedBase] == overrideSpellID and R.targetFamily[overrideSpellID] then
-        return false
+        return false, true
     end
 
     R.explicitOverrides[normalizedBase] = overrideSpellID
     RebuildSpellFamilies()
     Log(("Override %d -> %d (%s)"):format(normalizedBase, overrideSpellID, tostring(source)))
-    return true
+    return true, true
 end
 
 local function IsRelevantSignal(spellID)
@@ -553,7 +575,7 @@ end
 local function GetFrameState(frame)
     local state = R.frameState[frame]
     if not state then
-        state = { alert = nil, shown = false, renderTarget = nil, isCDM = false }
+        state = { alert = nil, shown = false, animating = false, renderTarget = nil, isCDM = false }
         R.frameState[frame] = state
     end
     return state
@@ -611,6 +633,7 @@ local function EnsureAlert(frame)
     state.alert = alert
     state.renderTarget = target
     state.shown = false
+    state.animating = false
     pcall(alert.Hide, alert)
     RefreshAlertGeometry(frame, state)
     if type(target.HookScript) == "function" then
@@ -641,6 +664,7 @@ local function DeferHide(state)
 end
 
 local function HideAlert(state)
+    state.animating = false
     if not state.alert or not state.shown then
         R.pendingHides[state] = nil
         return
@@ -686,17 +710,24 @@ local function ShowFrameGlow(frame)
     end
 
     if state.isCDM and not state.assignmentReadable then return end
-    if state.shown and not R.pendingHides[state] then return end
+    if state.shown and state.animating and not R.pendingHides[state] then return end
     local alert = EnsureAlert(frame)
     if not alert then return end
 
-    StopAnimation(alert.ProcLoop)
-    if not pcall(alert.Show, alert) then return end
-    alert.animationPlaying = true
-    if not PlayAnimation(alert.ProcStartAnim) then
-        PlayAnimation(alert.ProcLoop)
+    local wasShown = state.shown
+    if not wasShown and not pcall(alert.Show, alert) then return end
+
+    local played
+    if wasShown then
+        played = PlayAnimation(alert.ProcLoop) or PlayAnimation(alert.ProcStartAnim)
+    else
+        StopAnimation(alert.ProcLoop)
+        played = PlayAnimation(alert.ProcStartAnim) or PlayAnimation(alert.ProcLoop)
     end
+
     state.shown = true
+    state.animating = played and true or false
+    alert.animationPlaying = state.animating
     R.pendingHides[state] = nil
 end
 
@@ -757,19 +788,22 @@ end
 local function DeepMapButtons(maxFrames)
     if type(EnumerateFrames) ~= "function" then return end
     local count = 0
-    local frame = EnumerateFrames()
-    while frame do
+    local ok, current = pcall(EnumerateFrames)
+    if not ok or not IsAccessible(current) then return end
+    while current do
         count = count + 1
         if count > maxFrames then break end
-        if FrameCanBeUsed(frame) and type(frame.GetObjectType) == "function" then
-            local ok, objectType = pcall(frame.GetObjectType, frame)
-            objectType = ok and SafeString(objectType) or nil
-            if ok and (objectType == "Button" or objectType == "CheckButton") then
-                local matches = IsCurrentTargetButton(frame)
-                if matches then R.knownButtons[frame] = true end
+        if FrameCanBeUsed(current) and type(current.GetObjectType) == "function" then
+            local objectOK, objectType = pcall(current.GetObjectType, current)
+            objectType = objectOK and SafeString(objectType) or nil
+            if objectOK and (objectType == "Button" or objectType == "CheckButton") and
+               IsCurrentTargetButton(current) then
+                R.knownButtons[current] = true
             end
         end
-        frame = EnumerateFrames(frame)
+        local nextOK, nextFrame = pcall(EnumerateFrames, current)
+        if not nextOK or not IsAccessible(nextFrame) then break end
+        current = nextFrame
     end
 end
 
@@ -812,7 +846,16 @@ local function RefreshCDMFrame(frame)
 end
 
 local function HookCDMItem(frame)
-    if not FrameCanBeUsed(frame) or type(hooksecurefunc) ~= "function" then return end
+    if not IsAccessible(frame) or not frame then return end
+    if InCombat() then
+        HideFrameGlow(frame)
+        R.needsRescan = true
+        return
+    end
+    if not FrameCanBeUsed(frame) or type(hooksecurefunc) ~= "function" then
+        HideFrameGlow(frame)
+        return
+    end
     local hooked = R.cdmItemHooks[frame]
     if not hooked then hooked = {}; R.cdmItemHooks[frame] = hooked end
     for _, name in ipairs({ "SetCooldownID", "SetOverrideSpell", "ClearCooldownID", "ResetCooldownData" }) do
@@ -835,7 +878,7 @@ local CDM_VIEWER_NAMES = {
 local function EnumerateCDMViewer(viewer, seen)
     if not FrameCanBeUsed(viewer) then return false end
     local pool = viewer.itemFramePool
-    if not IsAccessible(pool) or type(pool) ~= "table" or type(pool.EnumerateActive) ~= "function" then return false end
+    if not IsReadableTable(pool) or type(pool.EnumerateActive) ~= "function" then return false end
     return pcall(function()
         for item in pool:EnumerateActive() do
             if not IsAccessible(item) then error("Unavailable viewer item") end
@@ -853,26 +896,47 @@ local function ReconcileCDMFrames()
         for item in pairs(R.cdmFrames) do ClearCDMFrame(item) end
         return
     end
+    if InCombat() then
+        -- Reuse only already observed instances in combat. Pool enumeration, new
+        -- post-hooks and alert construction are deferred to one post-combat rescan.
+        R.needsRescan = true
+        for item in pairs(R.cdmItemHooks) do RefreshCDMFrame(item) end
+        return
+    end
+
     local seen = NewWeakKeyTable()
     local allReadable, foundViewer = true, false
     for i = 1, #CDM_VIEWER_NAMES do
         local viewer = _G[CDM_VIEWER_NAMES[i]]
-        if IsAccessible(viewer) and viewer then
+        if not IsAccessible(viewer) then
+            allReadable = false
+        elseif not viewer then
+            -- The selected client defines all four viewers together. A missing
+            -- configured surface is incomplete evidence and cannot authorize pruning.
+            allReadable = false
+        else
             foundViewer = true
             if FrameCanBeUsed(viewer) and type(hooksecurefunc) == "function" and
                not R.cdmViewerHooks[viewer] and type(viewer.OnAcquireItemFrame) == "function" then
                 -- Mixins are copied into frames. Hook the actual instance, including
                 -- instances created before this addon was loaded.
                 hooksecurefunc(viewer, "OnAcquireItemFrame", function(_, item)
-                    if not RuntimeEnabled() or not DB.cdm or not FrameCanBeUsed(item) then return end
+                    if not RuntimeEnabled() or not DB.cdm or not IsAccessible(item) or not item then return end
+                    if InCombat() then
+                        HideFrameGlow(item)
+                        R.needsRescan = true
+                        return
+                    end
+                    if not FrameCanBeUsed(item) then
+                        HideFrameGlow(item)
+                        return
+                    end
                     HookCDMItem(item)
                     RefreshCDMFrame(item)
                 end)
                 R.cdmViewerHooks[viewer] = true
             end
             if not EnumerateCDMViewer(viewer, seen) then allReadable = false end
-        elseif not IsAccessible(viewer) then
-            allReadable = false
         end
     end
     if foundViewer and allReadable then
@@ -1103,14 +1167,14 @@ function SDG:RescanButtons(deep)
 end
 
 function SDG:RequestRescan(reason, deep)
-    if not RuntimeEnabled() then return end
+    if not RuntimeEnabled() then return false end
     R.rescanReason = reason or R.rescanReason
     R.rescanDeep = R.rescanDeep or deep
     if InCombat() then
         R.needsRescan = true
-        return
+        return true
     end
-    if R.timers.rescan then return end
+    if R.timers.rescan then return true end
     ScheduleTimer("rescan", RESCAN_DELAY, function()
         local useDeep = R.rescanDeep
         R.rescanDeep = false
@@ -1119,13 +1183,18 @@ function SDG:RequestRescan(reason, deep)
         self:RescanButtons(useDeep)
         ReconcileGlow(why or "rescan")
     end)
+    return R.timers.rescan ~= nil
 end
 
 local function AttachActionButtonCallback()
     if R.actionCallbackAttached or not EventRegistry or type(EventRegistry.RegisterCallback) ~= "function" then return end
     EventRegistry:RegisterCallback("ActionButton.OnActionChanged", function(_, button)
-        if not RuntimeEnabled() or not FrameCanBeUsed(button) then return end
+        if not RuntimeEnabled() or not IsAccessible(button) or not button then return end
         R.knownButtons[button] = true
+        if not FrameCanBeUsed(button) then
+            HideFrameGlow(button)
+            return
+        end
         RefreshButton(button, GetButtonSlot(button))
     end, R.actionCallbackOwner)
     R.actionCallbackAttached = true
@@ -1138,7 +1207,14 @@ local RUNTIME_EVENTS = {
     "UPDATE_BONUS_ACTIONBAR", "UPDATE_VEHICLE_ACTIONBAR", "UPDATE_MACROS", "MODIFIER_STATE_CHANGED",
     "PLAYER_TALENT_UPDATE", "TRAIT_CONFIG_UPDATED", "PLAYER_SPECIALIZATION_CHANGED",
     "SPELLS_CHANGED", "SPELL_SECRECY_CHANGED", "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED",
-    "COOLDOWN_VIEWER_TABLE_HOTFIXED", "ADDON_LOADED",
+    "COOLDOWN_VIEWER_DATA_LOADED", "COOLDOWN_VIEWER_TABLE_HOTFIXED", "ADDON_LOADED",
+}
+
+local RELEVANT_ADDONS = {
+    Blizzard_ActionBar = true,
+    Bartender4 = true,
+    Dominos = true,
+    ElvUI = true,
 }
 
 local function ResetTransientState(clearOverrides)
@@ -1155,7 +1231,6 @@ end
 local function StopRuntime()
     R.runtimeRegistered = false
     for i = 1, #RUNTIME_EVENTS do frame:UnregisterEvent(RUNTIME_EVENTS[i]) end
-    frame:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
     if R.actionCallbackAttached and EventRegistry and type(EventRegistry.UnregisterCallback) == "function" then
         EventRegistry:UnregisterCallback("ActionButton.OnActionChanged", R.actionCallbackOwner)
         R.actionCallbackAttached = false
@@ -1171,7 +1246,6 @@ local function StartRuntime()
     if not RuntimeEnabled() or R.runtimeRegistered then return end
     R.runtimeRegistered = true
     for i = 1, #RUNTIME_EVENTS do frame:RegisterEvent(RUNTIME_EVENTS[i]) end
-    frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
     FlushPendingHides()
     AttachActionButtonCallback()
     if InCombat() then
@@ -1264,14 +1338,13 @@ local function OnEvent(_, event, ...)
         HandleOverlayHide(...)
     elseif event == "COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED" then
         local baseSpellID, overrideSpellID = ...
-        if LearnExplicitOverride(baseSpellID, overrideSpellID, event) then
+        local changed, relevant = LearnExplicitOverride(baseSpellID, overrideSpellID, event)
+        if not relevant then return end
+        if changed then
             RefreshAssignments()
             SDG:RequestRescan(event, false)
         end
         ReconcileGlow(event)
-    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        -- Registration is player-only; the payload is not a proc-state source.
-        QueueReconcile("spellcast", OVERLAY_RECONCILE_DELAY)
     elseif event == "PLAYER_REGEN_ENABLED" then
         RefreshAssignments()
         if R.needsGeometry then PrimeTrackedAlerts() end
@@ -1286,10 +1359,30 @@ local function OnEvent(_, event, ...)
         SDG:RequestRescan(event, false)
         ReconcileGlow(event)
     elseif event == "ADDON_LOADED" then
+        local addonName = SafeString((...))
+        if addonName and RELEVANT_ADDONS[addonName] then
+            SDG:RequestRescan(event .. ":" .. addonName, false)
+        end
+    elseif event == "COOLDOWN_VIEWER_DATA_LOADED" then
+        -- Public readiness signal for the source-coupled viewer adapter.
         SDG:RequestRescan(event, false)
+    elseif event == "COOLDOWN_VIEWER_TABLE_HOTFIXED" then
+        -- Static viewer data changed, but runtime override observations and proc
+        -- evidence remain valid until their own authoritative events replace them.
+        RebuildSpellFamilies()
+        RefreshAssignments()
+        SDG:RequestRescan(event, false)
+        ReconcileGlow(event)
     elseif event == "PLAYER_TALENT_UPDATE" or event == "TRAIT_CONFIG_UPDATED" or
-           event == "PLAYER_SPECIALIZATION_CHANGED" or event == "SPELLS_CHANGED" or
-           event == "SPELL_SECRECY_CHANGED" or event == "COOLDOWN_VIEWER_TABLE_HOTFIXED" then
+           event == "SPELLS_CHANGED" then
+        -- These events invalidate spell/assignment relationships, not proc state.
+        -- Drop stale override observations and preserve animation continuity.
+        ClearMap(R.explicitOverrides)
+        RebuildSpellFamilies()
+        RefreshAssignments()
+        SDG:RequestRescan(event, false)
+        ReconcileGlow(event)
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" or event == "SPELL_SECRECY_CHANGED" then
         if event == "PLAYER_SPECIALIZATION_CHANGED" then
             local unit = ...
             if SafeString(unit) ~= "player" then return end
@@ -1301,14 +1394,13 @@ local function OnEvent(_, event, ...)
         ReconcileGlow(event)
     else
         local changedSlot = event == "ACTIONBAR_SLOT_CHANGED" and SafeID((...)) or nil
-        RefreshKnownButtons(changedSlot)
-        -- Bar providers can update their assignment after our native event handler.
-        -- One unfiltered pass covers every slot in a burst without retaining
-        -- event arguments or replacing the pending timer on each invalidation.
+        if changedSlot then RefreshKnownButtons(changedSlot) end
+        -- Bar providers can publish current assignments after the native event.
+        -- One unfiltered next-frame pass covers the complete burst. Action events
+        -- do not wake the independent proc-state query.
         if not R.timers["action-refresh"] then
             ScheduleTimer("action-refresh", 0, RefreshKnownButtons)
         end
-        QueueReconcile(event, OVERLAY_RECONCILE_DELAY)
     end
 end
 
@@ -1329,8 +1421,11 @@ local function DumpStatus()
             :format(SafeString(version) or "unknown", SafeString(build) or "unknown",
                 tostring(SafeNumber(interface) or "unknown")))
     end
-    Print(("version=%s schema=%d enabled=%s combat=%s glow=%s detection=%s")
-        :format(GetAddonVersion(), CURRENT_SCHEMA, tostring(DB.enabled), tostring(InCombat()), tostring(R.glowActive), tostring(R.lastDetection)))
+    local storedDB = _G.SuddenDoomGlowDB
+    local storedSchema = type(storedDB) == "table" and SafeNumber(storedDB.schemaVersion) or CURRENT_SCHEMA
+    Print(("version=%s schema=%s supported=%s enabled=%s combat=%s glow=%s detection=%s")
+        :format(GetAddonVersion(), tostring(storedSchema or "unknown"), tostring(not R.unsupportedSchema),
+            tostring(DB.enabled), tostring(InCombat()), tostring(R.glowActive), tostring(R.lastDetection)))
     Print(("buttons=%d cdm=%d query=%d/%d authoritative=%s eventSignals=%d")
         :format(CountEntries(R.trackedButtons), CountEntries(R.cdmFrames), R.overlayQueryReadable,
             R.overlayQueryCandidates, tostring(R.overlayQueryAuthoritative), CountEntries(R.eventSignals)))
@@ -1381,18 +1476,33 @@ _G.SlashCmdList["SUDDEN_DOOM_GLOW"] = function(message)
         if not SDG:SetOption("debug", not DB.debug) then return end
         Print("Debug: " .. (DB.debug and "ON" or "OFF"))
     elseif command == "rescan" then
-        SDG:RequestRescan("slash", argument:lower() == "deep")
-        Print(InCombat() and "Rescan deferred until combat ends" or "Rescan queued")
+        if SDG:RequestRescan("slash", argument:lower() == "deep") then
+            Print(InCombat() and "Rescan deferred until combat ends" or "Rescan queued")
+        else
+            Print("Rescan unavailable while the addon runtime is disabled.")
+        end
     elseif command == "test" then
         SDG:TestGlow()
     elseif command == "spell" then
-        if not R.unsupportedSchema then ToggleID(DB.targetSpellIDs, argument, "spell") end
+        if R.unsupportedSchema then
+            Print("Update Sudden Doom Glow to edit settings saved by a newer version.")
+        else
+            ToggleID(DB.targetSpellIDs, argument, "spell")
+        end
     elseif command == "signal" or command == "aura" then
-        if not R.unsupportedSchema then ToggleID(DB.signalSpellIDs, argument, "signal") end
+        if R.unsupportedSchema then
+            Print("Update Sudden Doom Glow to edit settings saved by a newer version.")
+        else
+            ToggleID(DB.signalSpellIDs, argument, "signal")
+        end
     elseif command == "spells" then
-        Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
-        Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
-        Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
+        if R.unsupportedSchema then
+            Print("Configured spells are unavailable until the addon supports the newer settings schema.")
+        else
+            Print("targets configured: " .. FormatIDList(DB.targetSpellIDs))
+            Print("targets resolved: " .. FormatIDList(R.targetFamilyList))
+            Print("signals resolved: " .. FormatIDList(R.signalFamilyList))
+        end
     elseif command == "cdm" then
         argument = argument:lower()
         if argument == "on" then

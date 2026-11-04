@@ -1,56 +1,58 @@
 # API contracts and source-coupled integrations
 
-## Evidence pin
+## Evidence pins
 
-Reviewed against `Gethe/wow-ui-source@d07eb00237d8891f153215db98a5df880a26cfe5`, Retail build `12.1.5.70688`, on `2026-11-03`. The current `live` branch head matched this commit. This is source evidence; the current client build, taint behavior, runtime access, rendering, and combat behavior are **NOT-RUN**.
+Knowledge-base policy is read from `UnknownAlienHuman/wow-addon-engineering-kb@b03e1635d0ff8bcd6be4f4dfac589dafec4e5e83`. Its selected source is Retail `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`.
 
-## Generated public API contracts
+Current live source was rechecked at `Gethe/wow-ui-source@297d7aaaa736f346b3e036f38ee088eaf7f8c07f`, Retail `12.1.5.70783`, on `2026-11-03`. The complete one-commit `70688 → 70783` delta changes Battle.net, Roleset, TextureUtils, Unit-event metadata, friends/chat presentation, and `version.txt`; it does not change the ActionBar, Spell Activation Overlay, alert-template, or Cooldown Viewer files used by this addon.
 
-The generated `SpellActivationOverlayDocumentation.lua` defines:
+This is source evidence only. Client build, taint, runtime access, combat behavior, rendering, and performance remain **NOT-RUN**.
 
-- `C_SpellActivationOverlay.IsSpellOverlayed(spellID)` with a required numeric `spellID`, a non-nil boolean result, and `SecretArguments = "AllowedWhenUntainted"`.
-- `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW` and `SPELL_ACTIVATION_OVERLAY_GLOW_HIDE` as synchronous events, each carrying a non-nil numeric `spellID`.
+## Generated public contracts
 
-The generated `ActionBarFrameDocumentation.lua` defines:
+`SpellActivationOverlayDocumentation.lua` defines:
 
-- `C_ActionBar.GetSpell(actionID)` with a `luaIndex` action ID, a non-nil numeric spell ID result, and `SecretArguments = "AllowedWhenUntainted"`.
+- `C_SpellActivationOverlay.IsSpellOverlayed(spellID)` with `SecretArguments = AllowedWhenUntainted` and a boolean result;
+- synchronous `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW(spellID)` and `...GLOW_HIDE(spellID)` events.
 
-For an observed button's current assignment, `C_ActionBar.GetSpell(actionID)` is the primary slot-to-spell lookup. If the function is unavailable or an ordinary result contains no valid spell ID, the fallback reads `GetActionInfo`; for a macro action, `GetMacroSpell` resolves its spell. A failed or inaccessible query stays unknown and does not authorize fallback matching.
+`ActionBarFrameDocumentation.lua` defines `C_ActionBar.GetSpell(actionID)` under its caller policy. For one observed button's current ordinary assignment, this is the primary lookup. An ordinary result with no valid spell may fall back to `GetActionInfo`; macro actions use `GetMacroSpell`. Failure or inaccessibility stays unknown and does not authorize another guess.
 
-Use the exact caller/access policy for every query and gate secret-capable values before Lua comparison, conversion, indexing, formatting, storage, or deferral. The `GetActionInfo` fallback is scoped to an observed button's current assignment; it is not a slot-discovery API.
+Access gates precede comparison, nil/type tests, conversion, table keys/indexes, formatting, logging, persistence, or deferred capture.
 
-Pinned generated docs:
+Pinned current files:
 
-- [SpellActivationOverlayDocumentation.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_APIDocumentationGenerated/SpellActivationOverlayDocumentation.lua)
-- [ActionBarFrameDocumentation.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_APIDocumentationGenerated/ActionBarFrameDocumentation.lua)
-- [FrameScriptDocumentation.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_APIDocumentationGenerated/FrameScriptDocumentation.lua)
-- [ActionButton.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_ActionBar/Shared/ActionButton.lua)
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_APIDocumentationGenerated/SpellActivationOverlayDocumentation.lua`
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_APIDocumentationGenerated/ActionBarFrameDocumentation.lua`
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_ActionBar/Shared/ActionButton.lua`
 
-## Source-coupled visual details
+## Alert-template implementation boundary
 
-The addon creates `ActionButtonSpellAlertTemplate` and uses its `ProcStartAnim` and `ProcLoop` children. Blizzard's selected implementation calls the animations directly and wires start completion to the loop. This confirms the implementation for this source pin, but the template and child names are not generated addon APIs. They remain source-coupled and require client validation.
+The addon creates `ActionButtonSpellAlertTemplate` and uses its `ProcStartAnim` and `ProcLoop` children. These names are private UI implementation evidence, not a generated third-party extension API. The addon owns its child and does not join or patch Blizzard's global alert manager.
 
-Pinned source:
+Pinned current files:
 
-- [ActionButtonSpellAlerts.xml](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_ActionBar/Shared/ActionButtonSpellAlerts.xml)
-- [ActionButtonSpellAlerts.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_ActionBar/Shared/ActionButtonSpellAlerts.lua)
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_ActionBar/Shared/ActionButtonSpellAlerts.xml`
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_ActionBar/Shared/ActionButtonSpellAlerts.lua`
 
-## Cooldown Viewer adapter boundary
+## Cooldown Viewer boundary
 
-The integration observes the actual configured viewer instances, their active item pools during setup/recovery, and item lifecycle methods on each actual item instance. The selected source confirms `CooldownViewerMixin:OnAcquireItemFrame` in `CooldownViewer.lua` and item methods `SetCooldownID`, `SetOverrideSpell`, `ClearCooldownID`, and `ResetCooldownData` in `CooldownViewerItemData.lua`. These are private UI implementation details, not generated extension APIs.
+The generated contract supplies synchronous `COOLDOWN_VIEWER_DATA_LOADED`, `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED`, and `COOLDOWN_VIEWER_TABLE_HOTFIXED` events. The selected implementation supplies four viewer frames, `CooldownViewerMixin:OnAcquireItemFrame`, active `itemFramePool` objects, and item lifecycle methods `SetCooldownID`, `SetOverrideSpell`, `ClearCooldownID`, and `ResetCooldownData`. The events are public; the viewer, pool, and item method names are source-coupled private implementation details.
 
-For identity, the adapter reads only `GetBaseSpellID`, which represents the configured base spell. It does not read `GetSpellID`: in this source, that value may prefer the linked managed aura spell. Overlay events touch the existing tracked item set; pool enumeration remains limited to setup/recovery.
+The adapter therefore:
 
-The pinned native XML gives each viewer a fixed item template. Essential, Utility, and Buff Icon items have an `Icon` texture; Buff Bar items have a permanent child `Icon` frame. Item reuse resets data on the pooled item and does not replace that child. The addon places only its own alert child on the selected render target.
+- post-hooks actual instances once;
+- performs new hook attachment and pool enumeration only outside combat and retries on the public data-ready event;
+- reads only configured `GetBaseSpellID` identity;
+- clears on proved reset/reassignment;
+- access-gates external pool tables and prunes only from a complete readable generation covering all four selected viewers;
+- keeps proc events on the already tracked set and never enumerates pools from the hot path.
 
-Pinned source:
+Pinned current files:
 
-- [CooldownViewer.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_CooldownViewer/CooldownViewer.lua)
-- [CooldownViewerItemData.lua](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_CooldownViewer/CooldownViewerItemData.lua)
-- [CooldownViewer.xml](https://github.com/Gethe/wow-ui-source/blob/d07eb00237d8891f153215db98a5df880a26cfe5/Interface/AddOns/Blizzard_CooldownViewer/CooldownViewer.xml)
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_CooldownViewer/CooldownViewer.lua`
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_CooldownViewer/CooldownViewerItemData.lua`
+- `Gethe/wow-ui-source@297d7aa:Interface/AddOns/Blizzard_CooldownViewer/CooldownViewer.xml`
 
-## Current-client status
+## Runtime status
 
-The source pin was checked on `2026-11-03`; expected interface family is `120105`. No named client `GetBuildInfo()` record or live test matrix has been captured. Runtime compatibility and all client-dependent behaviors remain **NOT-RUN**.
-
-Reference knowledge base: https://github.com/UnknownAlienHuman/wow-addon-engineering-kb
+Expected interface is `120105`. No named-client `GetBuildInfo()` record or live matrix is attached to this release. See `VALIDATION.md` and `docs/LIVE_TEST_CHECKLIST.md`.

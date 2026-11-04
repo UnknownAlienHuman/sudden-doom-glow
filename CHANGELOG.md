@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.2 — 2026-11-03
+
+- Recheck the complete live-source transition from `12.1.5.70688` to `12.1.5.70783`; the addon-owned ActionBar, Spell Activation Overlay, alert-template, and Cooldown Viewer source slices are unchanged.
+- Remove the unrelated player-spellcast wake-up and stop action-assignment events from querying proc state.
+- Filter `ADDON_LOADED` to the native/third-party bar integrations the addon actually observes.
+- Preserve active overlay evidence across Cooldown Viewer hotfix and talent/spell assignment invalidations; discard stale explicit override observations only when spell relationships change.
+- Recover from the public `COOLDOWN_VIEWER_DATA_LOADED` readiness event and ignore irrelevant override updates.
+- Defer Cooldown Viewer pool enumeration, new hooks, and alert construction out of combat; reuse only already observed items during lockdown.
+- Treat a missing/inaccessible viewer or unreadable external pool table as incomplete evidence so partial observations cannot prune valid tracked items.
+- Recover alert animation after temporary animation-object inaccessibility without requiring another proc edge.
+- Hide stale action/CDM presentation when reassignment identity cannot be inspected, then recover from the next authoritative lifecycle pass.
+- Gate diagnostic values before formatting/logging and check current object access before other object probes.
+- Report disabled rescan requests and future-schema spell commands accurately.
+- Add focused regressions for each corrected lifecycle path. Live-client combat, taint, rendering, and performance remain **NOT-RUN**.
+
 ## 1.4.1 — 2026-11-03
 
 - Revalidate existing action-button and Cooldown Viewer assignments immediately when configured spell families change, including during combat.

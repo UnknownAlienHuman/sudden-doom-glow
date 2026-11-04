@@ -21,11 +21,15 @@ local function InCombat()
 end
 
 local function SafePrint(message)
-    if type(SDG.Print) == "function" then
-        SDG:Print(message)
-    elseif _G.DEFAULT_CHAT_FRAME then
-        _G.DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. tostring(message))
-    end
+    if type(SDG.Print) == "function" then SDG:Print(message) end
+end
+
+local function SafeMessage(value)
+    if type(_G.issecretvalue) == "function" and _G.issecretvalue(value) then return nil end
+    if type(_G.canaccessvalue) == "function" and not _G.canaccessvalue(value) then return nil end
+    local kind = type(value)
+    if kind ~= "string" and kind ~= "number" and kind ~= "boolean" then return nil end
+    return tostring(value)
 end
 
 local function IsVisible()
@@ -86,9 +90,11 @@ end
 
 function SDG:LogDebug(message)
     if type(SDG.GetOption) ~= "function" or not SDG:GetOption("debug") then return end
+    local safeMessage = SafeMessage(message)
+    if not safeMessage then return end
 
     local timestamp = _G.GetTime and _G.GetTime() or 0
-    lines[#lines + 1] = ("|cff888888[%.3f]|r %s"):format(timestamp, tostring(message))
+    lines[#lines + 1] = ("|cff888888[%.3f]|r %s"):format(timestamp, safeMessage)
     if #lines > MAX_LINES then table.remove(lines, 1) end
     ScheduleRefresh()
 end
@@ -180,8 +186,11 @@ function UI:Create()
     rescan:SetPoint("LEFT", clear, "RIGHT", 10, 0)
     rescan:SetText("Deep rescan")
     rescan:SetScript("OnClick", function()
-        SafePrint("Deep rescan requested")
-        if type(SDG.RequestRescan) == "function" then SDG:RequestRescan("debug-ui", true) end
+        if type(SDG.RequestRescan) == "function" and SDG:RequestRescan("debug-ui", true) then
+            SafePrint(InCombat() and "Deep rescan deferred until combat ends" or "Deep rescan queued")
+        else
+            SafePrint("Deep rescan unavailable while the addon runtime is disabled.")
+        end
     end)
 
     local test = _G.CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")

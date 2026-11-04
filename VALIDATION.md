@@ -1,40 +1,47 @@
 # Validation record
 
-This file tracks evidence that must come from a named Retail client. Source inspection and the stubbed harness are separate forms of evidence; neither establishes live behavior.
+Source inspection and stub execution are separate from named-client evidence.
 
 ## Current status
 
-- Addon release: `1.4.1`
-- TOC target interface: `120105` (expected for Retail 12.1.5)
-- Selected UI source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
-- Source pin check: `2026-11-03`
+- Addon release: `1.4.2`
+- TOC target interface: `120105` (expected)
+- KB selected source: `12.1.5.70688` / `d07eb00237d8891f153215db98a5df880a26cfe5`
+- Current live source recheck: `12.1.5.70783` / `297d7aaaa736f346b3e036f38ee088eaf7f8c07f`
+- Complete `70688 → 70783` relevant-slice comparison: **PASS**; no ActionBar, Spell Activation Overlay, alert-template, or Cooldown Viewer files changed
 - Static checks: **PASS**
-- Stubbed runtime smoke: **PASS** on Lua 5.1.1
-- Lua syntax check: **PASS** via Lua 5.1.1 `loadfile`
-- Client build/interface: **NOT-RUN**
-- Live combat, restrictions, event payloads, taint, rendering, and Cooldown Viewer lifecycle: **NOT-RUN**
+- Focused 1.4.2 stub regression: **PASS** under Lua 5.3 (`texlua`)
+- Focused regression against 1.4.1: **FAIL as expected** at the obsolete `UNIT_SPELLCAST_SUCCEEDED` owner
+- Exact Lua 5.1 syntax and broad `runtime_smoke.lua` rerun for 1.4.2: **NOT-RUN in this environment**
+- Deterministic package rebuild: **PASS**; two archives are byte-identical
+- Archive allowlist, safe paths, extracted static checks, extracted focused regression, and source/package byte parity: **PASS**
+- Archive SHA-256: `d1a97fd609416c1b0d115df394f36d39349f37d4e3e89283feddeb660de38a32` (`23824` bytes)
+- Named-client build/interface, combat, taint, rendering, and performance: **NOT-RUN**
 
-## 1.4.1 source and host review — 2026-11-03
+## 1.4.2 focused host review — 2026-11-03
 
-Static checks, Lua 5.1.1 syntax, and the stubbed runtime smoke pass. Coverage includes overlay arbitration, action and Cooldown Viewer assignment refresh after configuration changes, disabled pending-hide recovery, and future-schema slash refusal. Unreadable overlay payloads wake the authoritative query; missed ON transitions recover on authoritative context events. This is host/source evidence only: no WoW client, combat, taint, rendering, or performance result is claimed.
+The focused harness covers:
 
-Temporary variants that independently restore the old candidate-cache, disabled-cleanup, and unreadable-HIDE paths each fail the corresponding regression assertion. The unchanged final implementation passes all three.
+- no player-spellcast proc wake-up;
+- filtered addon-load plus public Cooldown Viewer data-readiness recovery;
+- separation of action assignment and irrelevant override updates from proc queries;
+- no OFF/ON restart on Cooldown Viewer hotfix or talent/spell mapping invalidations;
+- conservative stale-hide/recovery for unreadable action assignments and temporarily inaccessible animation groups;
+- no pruning from a missing viewer or inaccessible external pool table;
+- no new Cooldown Viewer enumeration/hook attachment during combat;
+- explicit future-schema spell-command refusal;
+- diagnostic access gating;
+- accurate disabled-rescan status;
+- optional UI owner attachment and Settings availability.
 
-## Prior 1.4.0 source and host review — 2026-11-03
+This is deterministic host evidence, not a WoW runtime result.
 
-The selected `live` source head still matches the pin above. The first pass was checked with Lua 5.1.5; this pass uses the available Lua 5.1.1 interpreter.
-
-Two behavioral regressions were reproduced independently against PR head `4439c39010d56c083adf7a285b58ee3e285086be`: a temporarily inaccessible button could not resume glow rendering, and a burst of slot changes lost the earlier slot's delayed assignment update. Both pass after replacing duplicate membership state and retaining one complete deferred refresh. The harness also checks alert-access boundaries and deep-scan deferral across combat.
-
-These checks validate ordinary Lua control flow and stubbed API interactions. They do not establish client access policy, taint safety, visual quality, or a measured performance gain.
-
-## Evidence record format
-
-Append one record per client build and context. Preserve failures and superseded evidence.
+## Named-client record format
 
 ```text
 build=
 interface=
+addon commit/package=
 date=
 context=outside|combat|encounter|mythicplus|arena|battleground
 bar implementation=
@@ -42,6 +49,9 @@ Cooldown Viewer layout=
 other addons=
 Sudden Doom stacks=
 overlay payload spellID=
+immediate query=
+next-frame query=
+post-grace query=
 resolved targets=
 resolved signals=
 tracked buttons=
@@ -49,5 +59,3 @@ tracked Cooldown Viewer items=
 result=pass|fail
 error/reproduction=
 ```
-
-See [docs/LIVE_TEST_CHECKLIST.md](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/LIVE_TEST_CHECKLIST.md) for the scenarios to record. Do not overwrite a failed result after a hotfix; append a record with the new build/context.

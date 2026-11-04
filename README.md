@@ -2,10 +2,11 @@
 
 Sudden Doom Glow mirrors active Sudden Doom spell activation overlays onto matching Death Coil, Epidemic, replacement action buttons, and configured Blizzard Cooldown Viewer items.
 
-- **Version:** 1.4.1
+- **Version:** 1.4.2
 - **Target:** Retail 12.1.5
 - **TOC interface:** `120105` (expected for this target)
-- **Selected UI source:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5` (checked 2026-11-03; live head matches)
+- **Current live UI source:** build `12.1.5.70783`, commit `297d7aaaa736f346b3e036f38ee088eaf7f8c07f` (checked 2026-11-03)
+- **Relevant source baseline:** build `12.1.5.70688`, commit `d07eb00237d8891f153215db98a5df880a26cfe5`; the complete `70688 → 70783` delta does not touch ActionBar, Spell Activation Overlay, or Cooldown Viewer files
 - **SavedVariables:** `SuddenDoomGlowDB`
 - **Optional dependency:** `Blizzard_CooldownViewer`
 
@@ -15,9 +16,9 @@ The TOC interface is target metadata. The addon's runtime client build has not b
 
 The addon listens to synchronous Spell Activation Overlay glow events and reconciles them against `C_SpellActivationOverlay.IsSpellOverlayed`. A readable `true` can turn the glow on. OFF is authoritative only when all configured candidates are readable and false. SHOW ordering receives a short grace; unavailable query state uses a bounded event fallback. Simultaneous spell IDs remain independent.
 
-Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. Relevant slot changes refresh immediately, followed by one coalesced next-frame pass over known buttons. Macro text is not searched to infer a castable spell.
+Spell roots are expanded through the current base/override APIs and the Cooldown Viewer spell-override event. The addon observes known button surfaces and checks each button's current assignment with `C_ActionBar.GetSpell`; the fallback reads `GetActionInfo` and resolves macros with `GetMacroSpell`. Relevant slot changes refresh immediately, followed by one coalesced next-frame pass over known buttons. Action assignment events do not independently query proc state. Macro text is not searched to infer a castable spell.
 
-The addon owns the glow state and its frame metadata. Alert construction and geometry changes are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances and uses each item's configured base spell ID. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
+The addon owns the glow state and its frame metadata. Alert construction, Cooldown Viewer pool discovery, and new lifecycle hooks are deferred out of combat. Cooldown Viewer integration is an optional, source-coupled adapter that observes actual viewer/item instances, recovers from the public data-ready event, access-gates external pool tables, and uses each item's configured base spell ID. Partial observations never authorize pruning. Details and limits are in [API contracts](https://github.com/UnknownAlienHuman/sudden-doom-glow/blob/main/docs/API_CONTRACTS.md).
 
 ## Settings
 
@@ -59,8 +60,9 @@ Run these commands from a repository checkout; the install archive does not incl
 
 ```bash
 python tests/static_checks.py .
-luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua
+luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression_1_4_2.lua
 lua tests/runtime_smoke.lua Core.lua
+lua tests/runtime_regression_1_4_2.lua Core.lua
 ```
 
 ## Packaging
@@ -71,7 +73,7 @@ Build the deterministic install archive with:
 python scripts/package.py
 ```
 
-The default output is `dist/SuddenDoomGlow-1.4.1.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
+The default output is `dist/SuddenDoomGlow-1.4.2.zip`. An output path can be supplied as the first argument. The archive contains one `SuddenDoomGlow/` directory and only the runtime files and user-facing release files in the packager allowlist.
 
 ## Install
 

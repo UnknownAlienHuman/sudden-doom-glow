@@ -1,38 +1,15 @@
 # Test and validation checks
 
-The static checker reads the TOC to determine the ordered runtime Lua files, checks
-the target interface/version metadata, and scans every loaded runtime file for
-forbidden legacy paths. The smoke harness supplies a deterministic subset of WoW
-APIs and checks persisted settings, proc signal arbitration, action mapping,
-protected-frame behavior, separate access to external parents and addon alerts,
-timer cleanup, Cooldown Viewer lifecycle handling, deferred alert cleanup and
-render recovery after access returns, query reconciliation for unreadable and
-removed identifiers, combat target removal without pool enumeration,
-combat-deferred deep rescans, and coalesced burst refreshes when bar providers
-publish action assignments late. It also checks that slash commands report
-refusal when SavedVariables use a future schema.
-
 Run from the repository root:
 
 ```bash
 python tests/static_checks.py .
-luac -p Core.lua
-luac -p Options.lua
-luac -p Debug.lua
+luac -p Core.lua Debug.lua Options.lua tests/runtime_smoke.lua tests/runtime_regression_1_4_2.lua
 lua tests/runtime_smoke.lua Core.lua
+lua tests/runtime_regression_1_4_2.lua Core.lua
+python scripts/package.py
 ```
 
-The current source and harness pass syntax checks and the smoke suite on Lua
-5.1. If `luac` is unavailable, syntax can be checked with the Lua interpreter:
+`runtime_smoke.lua` retains the broad 1.4.x stub matrix. `runtime_regression_1_4_2.lua` focuses on the third audit: filtered addon readiness, action/irrelevant-override query separation, CDM and talent/spell continuity, stale-override removal, animation recovery, external-table gates, conservative partial-viewer pruning, combat-deferred CDM setup, future-schema command refusal, diagnostic access gates, and accurate rescan status.
 
-```bash
-lua -e 'for _, path in ipairs({"Core.lua", "Debug.lua", "Options.lua", "tests/runtime_smoke.lua"}) do assert(loadfile(path)) end'
-```
-
-If a compatible Lua executable is unavailable in another environment, report
-the runtime check as not run; a different Lua version does not establish Lua 5.1
-syntax compatibility.
-
-These checks run against stubs. They do not establish compatibility with a live
-Retail client or verify current hotfixed event payloads. Live client validation
-remains **NOT-RUN**; see the client matrix recorded in `../VALIDATION.md`.
+These tests use deterministic stubs. They do not establish live Retail behavior, taint safety, visual quality, hotfixed event payloads, or measured performance. Record those separately in `VALIDATION.md`.

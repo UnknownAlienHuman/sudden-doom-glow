@@ -3,7 +3,7 @@
 ## Notes: Reliable Sudden Doom proc highlighting for Death Coil, Epidemic, replacements, and Cooldown Viewer.
 ## Author: Neomorph
 ## OptionalDeps: Blizzard_CooldownViewer
-## Version: 1.4.1
+## Version: 1.4.2
 ## SavedVariables: SuddenDoomGlowDB
 
 Core.lua
