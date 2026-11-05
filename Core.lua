@@ -173,6 +173,21 @@ local function WriteMember(container, key, value)
     return pcall(WriteIndex, container, key, value)
 end
 
+local function ReadOptionalBooleanMethod(container, methodName)
+    local method, known = ReadMember(container, methodName)
+    if not known then return nil, false end
+    if method == nil then return nil, true end
+    if type(method) ~= "function" then return nil, false end
+
+    local ok, value = pcall(method, container)
+    if not ok or not IsAccessible(value) or type(value) ~= "boolean" then
+        return nil, false
+    end
+    return value, true
+end
+
+local FrameCanBeUsed
+
 local function SafeMessage(value)
     if not IsAccessible(value) then return nil end
     local kind = type(value)
@@ -182,8 +197,13 @@ end
 
 local function Print(message)
     local text = SafeMessage(message)
-    if text and _G.DEFAULT_CHAT_FRAME and _G.DEFAULT_CHAT_FRAME.AddMessage then
-        _G.DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffSuddenDoomGlow|r: " .. text)
+    if not text or not FrameCanBeUsed then return end
+
+    local chatFrame, frameKnown = ReadMember(_G, "DEFAULT_CHAT_FRAME")
+    if not frameKnown or not FrameCanBeUsed(chatFrame) then return end
+    local addMessage, methodKnown = ReadMember(chatFrame, "AddMessage")
+    if methodKnown and type(addMessage) == "function" then
+        pcall(addMessage, chatFrame, "|cff66ccffSuddenDoomGlow|r: " .. text)
     end
 end
 
@@ -235,31 +255,37 @@ local function SafeID(value)
     return nil
 end
 
+local function ParseActionSlotEvent(value)
+    -- ACTIONBAR_SLOT_CHANGED uses zero as an explicit broad invalidation. A
+    -- denied or malformed payload is not permission to reinterpret the event
+    -- as that broad case.
+    if not IsAccessible(value) or type(value) ~= "number" or value ~= value or value % 1 ~= 0 then
+        return nil, false
+    end
+    if value == 0 then return nil, true end
+    local slot = SafeID(value)
+    return slot, slot ~= nil
+end
+
 local function SafeString(value)
     if IsAccessible(value) and type(value) == "string" then return value end
     return nil
 end
 
-local function FrameCanBeUsed(frame)
+FrameCanBeUsed = function(frame)
     if not IsAccessible(frame) or not frame then return false end
     local kind = type(frame)
     if kind ~= "table" and kind ~= "userdata" then return false end
     -- Current-context access is the first object gate. It is not cached across
     -- callbacks, combat, restriction transitions or deferred work.
-    local accessMethod, accessKnown = ReadMember(frame, "CanBeAccessedInContext")
-    if not accessKnown then return false end
-    if accessMethod ~= nil then
-        if type(accessMethod) ~= "function" then return false end
-        local ok, accessible = pcall(accessMethod, frame)
-        if not ok or not IsAccessible(accessible) or not accessible then return false end
-    end
-    local forbiddenMethod, forbiddenKnown = ReadMember(frame, "IsForbidden")
-    if not forbiddenKnown then return false end
-    if forbiddenMethod ~= nil then
-        if type(forbiddenMethod) ~= "function" then return false end
-        local ok, forbidden = pcall(forbiddenMethod, frame)
-        if not ok or not IsAccessible(forbidden) or forbidden then return false end
-    end
+    local accessible, accessKnown = ReadOptionalBooleanMethod(frame, "CanBeAccessedInContext")
+    if not accessKnown or accessible == false then return false end
+
+    local constrained, constraintsKnown = ReadOptionalBooleanMethod(frame, "HasAccessConstraints")
+    if not constraintsKnown or (constrained == true and accessible ~= true) then return false end
+
+    local forbidden, forbiddenKnown = ReadOptionalBooleanMethod(frame, "IsForbidden")
+    if not forbiddenKnown or forbidden == true then return false end
     return true
 end
 
@@ -278,7 +304,7 @@ end
 local function CancelTimer(key)
     local timer = R.timers[key]
     R.timers[key] = nil
-    if timer and timer.handle then timer.handle:Cancel() end
+    if timer and timer.handle then CallMethod(timer.handle, "Cancel") end
 end
 
 local function CancelTimers()
@@ -292,7 +318,7 @@ end
 
 local function ScheduleTimer(key, delay, callback)
     CancelTimer(key)
-    if not RuntimeEnabled() then return end
+    if not RuntimeEnabled() then return false end
     local timer = {}
     R.timers[key] = timer
     local function Run()
@@ -300,21 +326,44 @@ local function ScheduleTimer(key, delay, callback)
         R.timers[key] = nil
         if RuntimeEnabled() then callback() end
     end
+
     if C_Timer and type(C_Timer.NewTimer) == "function" then
-        timer.handle = C_Timer.NewTimer(delay, Run)
-    elseif C_Timer and type(C_Timer.After) == "function" then
-        -- Identity gating still cancels late callbacks on this compatibility path.
-        C_Timer.After(delay, Run)
-    else
-        R.timers[key] = nil
+        local ok, handle = pcall(C_Timer.NewTimer, delay, Run)
+        if ok then
+            -- A successful call owns scheduled work even when the callback object
+            -- itself is nil or inaccessible. Identity gating still cancels it.
+            if R.timers[key] == timer and IsAccessible(handle) and handle then
+                timer.handle = handle
+            end
+            return true
+        end
     end
+
+    if C_Timer and type(C_Timer.After) == "function" then
+        -- Compatibility fallback has no handle; stale callbacks are harmless
+        -- because only the current ordinary owner token may run.
+        local ok = pcall(C_Timer.After, delay, Run)
+        if ok then return true end
+    end
+
+    if R.timers[key] == timer then R.timers[key] = nil end
+    return false
 end
 
 local function GetAddonVersion()
     if C_AddOns and type(C_AddOns.GetAddOnMetadata) == "function" then
-        return SafeString(C_AddOns.GetAddOnMetadata(ADDON_NAME, "Version")) or "unknown"
+        local ok, version = pcall(C_AddOns.GetAddOnMetadata, ADDON_NAME, "Version")
+        if ok then return SafeString(version) or "unknown" end
     end
     return "unknown"
+end
+
+local function IsAddOnFullyLoaded(addonName)
+    if not (C_AddOns and type(C_AddOns.IsAddOnLoaded) == "function") then
+        return false
+    end
+    local ok, _loadedOrLoading, loaded = pcall(C_AddOns.IsAddOnLoaded, addonName)
+    return ok and IsAccessible(loaded) and type(loaded) == "boolean" and loaded == true
 end
 
 local function CopyNumericList(source)
@@ -658,15 +707,17 @@ local function GetRenderTarget(frame)
     if not FrameCanBeUsed(frame) then return nil end
     local iconFrame, iconKnown = ReadMember(frame, "Icon")
     if not iconKnown then return nil end
-    if FrameCanBeUsed(iconFrame) then
+    if iconFrame ~= nil then
+        -- An assigned but currently inaccessible render target is incomplete
+        -- evidence. Never silently reparent the alert to the button instead.
+        if not FrameCanBeUsed(iconFrame) then return nil end
         local getObjectType, objectTypeKnown = ReadMember(iconFrame, "GetObjectType")
         if not objectTypeKnown then return nil end
         if getObjectType == nil then return frame end
         if type(getObjectType) ~= "function" then return nil end
         local ok, objectType = pcall(getObjectType, iconFrame)
-        if ok and SafeString(objectType) == "Frame" then
-            return iconFrame
-        end
+        if not ok or not IsAccessible(objectType) then return nil end
+        if SafeString(objectType) == "Frame" then return iconFrame end
     end
     return frame
 end
@@ -752,9 +803,16 @@ local function RefreshAlertGeometry(frame, state, resolvedTarget)
     end
     if not hookedTargets[target] then
         local hooked = pcall(hookScript, target, "OnSizeChanged", function()
+            -- Hooks cannot be removed. Once the frame adopts another render
+            -- target, an old target no longer owns geometry invalidation.
+            if state.renderTarget ~= target then return end
             state.geometryReady = false
-            R.needsGeometry = true
-            if not RuntimeEnabled() then return end
+            if not RuntimeEnabled() then
+                R.needsGeometry = true
+                return
+            end
+            -- A successful synchronous refresh owns this size change. Keep the
+            -- global recovery flag for actual failures or other dirty surfaces.
             RefreshAlertGeometry(frame, state)
         end)
         if not hooked then return MarkGeometryDirty(state) end
@@ -858,10 +916,10 @@ local function FlushPendingHides()
     UpdateRecoveryEvents()
 end
 
-local function ShowFrameGlow(frame)
+local function ShowFrameGlow(frame, assignmentValidated)
     if not FrameCanBeUsed(frame) then HideFrameGlow(frame); return end
     local state = GetFrameState(frame)
-    if not state.isCDM then
+    if not state.isCDM and not assignmentValidated then
         local current = IsCurrentTargetButton(frame)
         if not current then
             HideFrameGlow(frame)
@@ -870,7 +928,18 @@ local function ShowFrameGlow(frame)
     end
 
     if state.isCDM and not state.assignmentReadable then return end
-    if state.shown and state.animating and not R.pendingHides[state] then return end
+    if state.shown and state.animating and not R.pendingHides[state] then
+        local alertReady = FrameCanBeUsed(state.alert)
+        local startAnimation, startKnown = ReadMember(state.alert, "ProcStartAnim")
+        local loopAnimation, loopKnown = ReadMember(state.alert, "ProcLoop")
+        if alertReady and startKnown and loopKnown and
+           FrameCanBeUsed(startAnimation) and FrameCanBeUsed(loopAnimation) then
+            return
+        end
+        -- Current permission is not cached. A denied destination keeps the
+        -- desired ON state, but must be retried only at an explicit wake-up.
+        state.animating = false
+    end
     local alert = EnsureAlert(frame)
     if not alert then return end
 
@@ -900,13 +969,14 @@ local function ShowFrameGlow(frame)
     R.pendingHides[state] = nil
 end
 
-local function RefreshButton(button, slot)
+local function RefreshButton(button, slot, matchesTarget)
     if not IsAccessible(button) or not button then return end
     SetButtonSlotIndex(button, slot)
-    if slot and SlotMatchesTarget(slot) then
+    if slot and matchesTarget == nil then matchesTarget = SlotMatchesTarget(slot) end
+    if slot and matchesTarget then
         R.trackedButtons[button] = true
         EnsureAlert(button)
-        if R.glowActive then ShowFrameGlow(button) else HideFrameGlow(button) end
+        if R.glowActive then ShowFrameGlow(button, true) else HideFrameGlow(button) end
     else
         R.trackedButtons[button] = nil
         HideFrameGlow(button)
@@ -925,40 +995,45 @@ local NAMED_BUTTON_SETS = {
     { "MultiBar8Button", 12 },
     { "MultiBar9Button", 12 },
     { "MultiBar10Button", 12 },
-    { "BT4Button", 180, true },
-    { "DominosActionButton", 180, true },
+    { "BT4Button", 180, true, "Bartender4" },
+    { "DominosActionButton", 180, true, "Dominos" },
     -- Current Dominos reuses these Blizzard-style compatibility names for
     -- bars whose IDs are outside its own ActionButton name ranges.
-    { "MultiBarRightActionButton", 12, true },
-    { "MultiBarLeftActionButton", 12, true },
-    { "MultiBarBottomRightActionButton", 12, true },
-    { "MultiBarBottomLeftActionButton", 12, true },
-    { "MultiBar5ActionButton", 12, true },
-    { "MultiBar6ActionButton", 12, true },
-    { "MultiBar7ActionButton", 12, true },
+    { "MultiBarRightActionButton", 12, true, "Dominos" },
+    { "MultiBarLeftActionButton", 12, true, "Dominos" },
+    { "MultiBarBottomRightActionButton", 12, true, "Dominos" },
+    { "MultiBarBottomLeftActionButton", 12, true, "Dominos" },
+    { "MultiBar5ActionButton", 12, true, "Dominos" },
+    { "MultiBar6ActionButton", 12, true, "Dominos" },
+    { "MultiBar7ActionButton", 12, true, "Dominos" },
 }
 
 local function MapNamedButtons()
     for setIndex = 1, #NAMED_BUTTON_SETS do
         local prefix = NAMED_BUTTON_SETS[setIndex][1]
         local count = NAMED_BUTTON_SETS[setIndex][2]
-        for index = 1, count do
-            local button = _G[prefix .. index]
-            if FrameCanBeUsed(button) then
-                R.knownButtons[button] = true
-                -- Pageable bars need an existing overlay before a combat page
-                -- switch. Static Blizzard bars allocate only for current targets.
-                if NAMED_BUTTON_SETS[setIndex][3] then EnsureAlert(button) end
+        local provider = NAMED_BUTTON_SETS[setIndex][4]
+        if not provider or IsAddOnFullyLoaded(provider) then
+            for index = 1, count do
+                local button = _G[prefix .. index]
+                if FrameCanBeUsed(button) then
+                    R.knownButtons[button] = true
+                    -- Pageable bars need an existing overlay before a combat page
+                    -- switch. Static Blizzard bars allocate only for current targets.
+                    if NAMED_BUTTON_SETS[setIndex][3] then EnsureAlert(button) end
+                end
             end
         end
     end
 
-    for bar = 1, 15 do
-        for index = 1, 12 do
-            local button = _G["ElvUI_Bar" .. bar .. "Button" .. index]
-            if FrameCanBeUsed(button) then
-                R.knownButtons[button] = true
-                EnsureAlert(button)
+    if IsAddOnFullyLoaded("ElvUI") then
+        for bar = 1, 15 do
+            for index = 1, 12 do
+                local button = _G["ElvUI_Bar" .. bar .. "Button" .. index]
+                if FrameCanBeUsed(button) then
+                    R.knownButtons[button] = true
+                    EnsureAlert(button)
+                end
             end
         end
     end
@@ -1010,9 +1085,28 @@ local function ClearCDMFrame(frame)
     if state then state.isCDM = false; state.assignmentReadable = false end
 end
 
+local CDM_ITEM_HOOK_METHODS = {
+    "SetCooldownID", "SetOverrideSpell", "ClearCooldownID", "ResetCooldownData",
+}
+
+local function CDMItemHooksComplete(frame)
+    local hooked = R.cdmItemHooks[frame]
+    if not hooked then return false end
+    for i = 1, #CDM_ITEM_HOOK_METHODS do
+        if hooked[CDM_ITEM_HOOK_METHODS[i]] ~= true then return false end
+    end
+    return true
+end
+
 local function RefreshCDMFrame(frame)
     if not RuntimeEnabled() or not DB.cdm then return end
     if not IsAccessible(frame) or not frame then return end
+    if not CDMItemHooksComplete(frame) then
+        local state = R.frameState[frame]
+        if state then state.assignmentReadable = false end
+        HideFrameGlow(frame)
+        return
+    end
     local matches = CDMFrameMatches(frame)
     if matches == nil then
         -- Keep membership when identity cannot be read, but do not render an
@@ -1030,40 +1124,46 @@ local function RefreshCDMFrame(frame)
     if R.glowActive then ShowFrameGlow(frame) else HideFrameGlow(frame) end
 end
 
-local CDM_ITEM_HOOK_METHODS = {
-    "SetCooldownID", "SetOverrideSpell", "ClearCooldownID", "ResetCooldownData",
-}
+local function SuspendCDMFrame(frame)
+    local state = R.frameState[frame]
+    if state then state.assignmentReadable = false end
+    HideFrameGlow(frame)
+    R.needsRescan = true
+end
 
 local function HookCDMItem(frame)
-    if not IsAccessible(frame) or not frame then return end
+    if not IsAccessible(frame) or not frame then return false end
     if InCombat() then
-        HideFrameGlow(frame)
-        R.needsRescan = true
-        return
+        SuspendCDMFrame(frame)
+        return false
     end
     if not FrameCanBeUsed(frame) or type(hooksecurefunc) ~= "function" then
-        HideFrameGlow(frame)
-        return
+        SuspendCDMFrame(frame)
+        return false
     end
     local hooked = R.cdmItemHooks[frame]
     if not hooked then hooked = {}; R.cdmItemHooks[frame] = hooked end
     for i = 1, #CDM_ITEM_HOOK_METHODS do
         local name = CDM_ITEM_HOOK_METHODS[i]
         local method, methodKnown = ReadMember(frame, name)
-        if not methodKnown then
-            HideFrameGlow(frame)
-            R.needsRescan = true
-            return
+        if not methodKnown or type(method) ~= "function" then
+            SuspendCDMFrame(frame)
+            return false
         end
-        if not hooked[name] and type(method) == "function" then
+        if not hooked[name] then
             local clear = name == "ClearCooldownID" or name == "ResetCooldownData"
             local ok = pcall(hooksecurefunc, frame, name, function(item)
                 if not RuntimeEnabled() or not DB.cdm then return end
                 if clear then ClearCDMFrame(item) else RefreshCDMFrame(item) end
             end)
-            if ok then hooked[name] = true end
+            if not ok then
+                SuspendCDMFrame(frame)
+                return false
+            end
+            hooked[name] = true
         end
     end
+    return true
 end
 
 local CDM_VIEWER_NAMES = {
@@ -1077,16 +1177,21 @@ local function EnumerateCDMViewer(viewer, seen)
     if not poolKnown or not IsReadableTable(pool) then return false end
     local enumerateActive, enumerateKnown = ReadMember(pool, "EnumerateActive")
     if not enumerateKnown or type(enumerateActive) ~= "function" then return false end
-    return pcall(function()
+    local complete = true
+    local ok = pcall(function()
         for item in enumerateActive(pool) do
             if not IsAccessible(item) then error("Unavailable viewer item") end
             if item then
                 seen[item] = true
-                HookCDMItem(item)
-                RefreshCDMFrame(item)
+                if HookCDMItem(item) then
+                    RefreshCDMFrame(item)
+                else
+                    complete = false
+                end
             end
         end
     end)
+    return ok and complete
 end
 
 local function ReconcileCDMFrames()
@@ -1101,6 +1206,7 @@ local function ReconcileCDMFrames()
         for item in pairs(R.cdmItemHooks) do RefreshCDMFrame(item) end
         return
     end
+    if not IsAddOnFullyLoaded("Blizzard_CooldownViewer") then return end
 
     local seen = NewWeakKeyTable()
     local allReadable, foundViewer = true, false
@@ -1114,30 +1220,41 @@ local function ReconcileCDMFrames()
             allReadable = false
         else
             foundViewer = true
-            local acquireMethod, acquireKnown = ReadMember(viewer, "OnAcquireItemFrame")
-            if not acquireKnown then
+            if not FrameCanBeUsed(viewer) then
                 allReadable = false
-            elseif FrameCanBeUsed(viewer) and type(hooksecurefunc) == "function" and
-               not R.cdmViewerHooks[viewer] and type(acquireMethod) == "function" then
-                -- Mixins are copied into frames. Hook the actual instance, including
-                -- instances created before this addon was loaded.
-                local hooked = pcall(hooksecurefunc, viewer, "OnAcquireItemFrame", function(_, item)
-                    if not RuntimeEnabled() or not DB.cdm or not IsAccessible(item) or not item then return end
-                    if InCombat() then
-                        HideFrameGlow(item)
+            else
+                local acquireMethod, acquireKnown = ReadMember(viewer, "OnAcquireItemFrame")
+                if not acquireKnown then
+                    allReadable = false
+                elseif not R.cdmViewerHooks[viewer] then
+                    if type(hooksecurefunc) ~= "function" or type(acquireMethod) ~= "function" then
+                        allReadable = false
                         R.needsRescan = true
-                        return
+                    else
+                        -- Mixins are copied into frames. Hook the actual instance,
+                        -- including instances created before this addon was loaded.
+                        local hooked = pcall(hooksecurefunc, viewer, "OnAcquireItemFrame", function(_, item)
+                            if not RuntimeEnabled() or not DB.cdm or not IsAccessible(item) or not item then return end
+                            if InCombat() then
+                                SuspendCDMFrame(item)
+                                return
+                            end
+                            if not FrameCanBeUsed(item) then
+                                SuspendCDMFrame(item)
+                                return
+                            end
+                            if HookCDMItem(item) then RefreshCDMFrame(item) end
+                        end)
+                        if hooked then
+                            R.cdmViewerHooks[viewer] = true
+                        else
+                            allReadable = false
+                            R.needsRescan = true
+                        end
                     end
-                    if not FrameCanBeUsed(item) then
-                        HideFrameGlow(item)
-                        return
-                    end
-                    HookCDMItem(item)
-                    RefreshCDMFrame(item)
-                end)
-                if hooked then R.cdmViewerHooks[viewer] = true end
+                end
+                if not EnumerateCDMViewer(viewer, seen) then allReadable = false end
             end
-            if not EnumerateCDMViewer(viewer, seen) then allReadable = false end
         end
     end
     if foundViewer and allReadable then
@@ -1274,10 +1391,16 @@ ReconcileGlow = function(reason)
         R.lastDetection = "overlay-query-unavailable"
         SetGlow(true)
         if not R.timers["query-expire"] then
-            ScheduleTimer("query-expire", EVENT_FALLBACK_TTL - (now - R.lastQueryActiveAt), function()
+            local scheduled = ScheduleTimer("query-expire", EVENT_FALLBACK_TTL - (now - R.lastQueryActiveAt), function()
                 ClearQueryObservation()
                 ReconcileGlow("query-ttl")
             end)
+            if not scheduled then
+                -- A positive observation without a terminal owner cannot be kept.
+                ClearQueryObservation()
+                R.lastDetection = "no-readable-signal"
+                SetGlow(false)
+            end
         end
     else
         if queryAuthoritative then ClearEventSignals() end
@@ -1296,29 +1419,45 @@ local function QueueReconcile(reason, delay)
     if not delay or delay <= 0 then ReconcileGlow(reason); return end
     -- Coalesce bursts without continually postponing an already queued read.
     if R.timers.reconcile then return end
-    ScheduleTimer("reconcile", delay, function() ReconcileGlow(reason) end)
+    if not ScheduleTimer("reconcile", delay, function() ReconcileGlow(reason) end) then
+        ReconcileGlow(reason)
+    end
 end
 
 local function SetEventSignal(spellID)
     R.eventSignals[spellID] = Now()
-    ScheduleTimer("signal-expire:" .. spellID, EVENT_FALLBACK_TTL, function()
+    local expires = ScheduleTimer("signal-expire:" .. spellID, EVENT_FALLBACK_TTL, function()
         ClearEventSignal(spellID)
         ReconcileGlow("event-ttl")
     end)
-    ScheduleTimer("signal-grace:" .. spellID, OVERLAY_SHOW_GRACE + 0.01, function()
+    local reconciles = expires and ScheduleTimer("signal-grace:" .. spellID, OVERLAY_SHOW_GRACE + 0.01, function()
         if R.eventSignals[spellID] then ReconcileGlow("show-grace-expired") end
     end)
+    if not expires or not reconciles then
+        -- Event-only evidence is valid only with both bounded terminal owners.
+        ClearEventSignal(spellID)
+        return false
+    end
+    return true
 end
 
 local function HandleOverlayShow(spellID)
     spellID = SafeID(spellID)
+    if not spellID then
+        -- The payload cannot be inspected, but the ordinary event occurrence may
+        -- still wake a query over our configured ordinary candidates.
+        if not R.glowActive then QueueReconcile("overlay-show-opaque", OVERLAY_RECONCILE_DELAY) end
+        return
+    end
 
     if IsRelevantSignal(spellID) then
         R.queryHintSpellID = spellID
         SetEventSignal(spellID)
         ReconcileGlow("overlay-show")
-        QueueReconcile("overlay-show-delayed", OVERLAY_RECONCILE_DELAY)
-    else
+        if R.lastDetection ~= "overlay-query" then
+            QueueReconcile("overlay-show-delayed", OVERLAY_RECONCILE_DELAY)
+        end
+    elseif not R.glowActive then
         -- An unrelated overlay event is only a wake-up signal. This catches a
         -- newly hotfixed proc payload once the official query reports one of our
         -- known action/replacement spells, without treating every overlay as Sudden Doom.
@@ -1328,13 +1467,21 @@ end
 
 local function HandleOverlayHide(spellID)
     spellID = SafeID(spellID)
+    if not spellID then
+        if R.glowActive then QueueReconcile("overlay-hide-opaque", OVERLAY_RECONCILE_DELAY) end
+        return
+    end
 
     if IsRelevantSignal(spellID) then
         if R.queryHintSpellID == spellID then R.queryHintSpellID = nil end
         ClearEventSignal(spellID)
         ReconcileGlow("overlay-hide")
+        if R.glowActive or not R.overlayQueryAuthoritative then
+            QueueReconcile("overlay-hide-delayed", OVERLAY_RECONCILE_DELAY)
+        end
+    elseif R.glowActive then
+        QueueReconcile("overlay-hide-delayed", OVERLAY_RECONCILE_DELAY)
     end
-    QueueReconcile("overlay-hide-delayed", OVERLAY_RECONCILE_DELAY)
 end
 
 local function PrimeTrackedAlerts(forceGeometry)
@@ -1364,21 +1511,58 @@ end
 
 local function RefreshKnownButtons(changedSlot)
     if not RuntimeEnabled() then return end
+    local matchesBySlot = {}
+    local function RefreshCurrentButton(button)
+        local slot = GetButtonSlot(button)
+        local matchesTarget
+        if slot then
+            matchesTarget = matchesBySlot[slot]
+            if matchesTarget == nil then
+                matchesTarget = SlotMatchesTarget(slot) and true or false
+                matchesBySlot[slot] = matchesTarget
+            end
+        end
+        RefreshButton(button, slot, matchesTarget)
+    end
     if changedSlot then
         local slotSet = R.buttonsBySlot[changedSlot]
-        if not slotSet then return end
+        if not slotSet or not next(slotSet) then
+            R.buttonsBySlot[changedSlot] = nil
+            return
+        end
         for button in pairs(slotSet) do
-            RefreshButton(button, GetButtonSlot(button))
+            RefreshCurrentButton(button)
         end
         return
     end
 
     for button in pairs(R.knownButtons) do
-        RefreshButton(button, GetButtonSlot(button))
+        RefreshCurrentButton(button)
     end
 end
 
+local function ClearPendingActionRefresh()
+    CancelTimer("action-refresh")
+    R.actionRefreshAll = false
+    ClearMap(R.pendingActionSlots)
+end
+
+local function FlushPendingActionRefresh()
+    if R.actionRefreshAll then
+        R.actionRefreshAll = false
+        ClearMap(R.pendingActionSlots)
+        RefreshKnownButtons()
+        return
+    end
+    local pendingSlots = R.pendingActionSlots
+    R.pendingActionSlots = {}
+    for slot in pairs(pendingSlots) do RefreshKnownButtons(slot) end
+end
+
 local function QueueActionRefresh(changedSlot)
+    -- A complete settled rescan already owns assignment reconciliation. Do not
+    -- retain a second full pass that will run immediately before it.
+    if not InCombat() and R.timers.rescan then return end
     if changedSlot then
         R.pendingActionSlots[changedSlot] = true
     else
@@ -1386,19 +1570,9 @@ local function QueueActionRefresh(changedSlot)
         ClearMap(R.pendingActionSlots)
     end
     if R.timers["action-refresh"] then return end
-    ScheduleTimer("action-refresh", 0, function()
-        if R.actionRefreshAll then
-            R.actionRefreshAll = false
-            ClearMap(R.pendingActionSlots)
-            RefreshKnownButtons()
-            return
-        end
-        local pendingSlots = R.pendingActionSlots
-        R.pendingActionSlots = {}
-        for slot in pairs(pendingSlots) do
-            RefreshKnownButtons(slot)
-        end
-    end)
+    if not ScheduleTimer("action-refresh", 0, FlushPendingActionRefresh) then
+        FlushPendingActionRefresh()
+    end
 end
 
 local function RefreshAssignments()
@@ -1419,6 +1593,7 @@ function SDG:RescanButtons(deep)
         R.rescanDeep = R.rescanDeep or deep
         return
     end
+    ClearPendingActionRefresh()
     R.needsRescan = false
     RebuildSpellFamilies()
     MapNamedButtons()
@@ -1431,24 +1606,39 @@ function SDG:RescanButtons(deep)
     end
 end
 
+local function CompleteRescanRequest(owner, fallbackReason)
+    local useDeep = R.rescanDeep
+    R.rescanDeep = false
+    local why = R.rescanReason
+    R.rescanReason = nil
+    owner:RescanButtons(useDeep)
+    ReconcileGlow(why or fallbackReason or "rescan")
+end
+
 function SDG:RequestRescan(reason, deep)
     if not RuntimeEnabled() then return false end
     R.rescanReason = reason or R.rescanReason
     R.rescanDeep = R.rescanDeep or deep
     if InCombat() then
         R.needsRescan = true
-        return true
+        return true, "deferred"
     end
-    if R.timers.rescan then return true end
-    ScheduleTimer("rescan", RESCAN_DELAY, function()
-        local useDeep = R.rescanDeep
-        R.rescanDeep = false
-        local why = R.rescanReason
-        R.rescanReason = nil
-        self:RescanButtons(useDeep)
-        ReconcileGlow(why or "rescan")
+    ClearPendingActionRefresh()
+    if R.timers.rescan then return true, "queued" end
+    local scheduled = ScheduleTimer("rescan", RESCAN_DELAY, function()
+        CompleteRescanRequest(self, "rescan")
     end)
-    return R.timers.rescan ~= nil
+    if scheduled then return true, "queued" end
+    if not RuntimeEnabled() then
+        R.rescanDeep = false
+        R.rescanReason = nil
+        return false
+    end
+
+    -- Required recovery must not disappear merely because a timer provider
+    -- rejected construction. Perform one bounded synchronous pass instead.
+    CompleteRescanRequest(self, reason)
+    return true, "completed"
 end
 
 local function QueueMappingRecovery(reason, clearOverrides)
@@ -1472,6 +1662,8 @@ local function AttachActionButtonCallback()
         if not RuntimeEnabled() or not IsAccessible(button) or not button then return end
         R.knownButtons[button] = true
         if not FrameCanBeUsed(button) then
+            SetButtonSlotIndex(button, nil)
+            R.trackedButtons[button] = nil
             HideFrameGlow(button)
             return
         end
@@ -1504,10 +1696,41 @@ local function ResetTransientState(clearOverrides)
     R.testUntil = 0
     R.needsRescan, R.rescanDeep = false, false
     R.rescanReason = nil
-    R.actionRefreshAll = false
-    ClearMap(R.pendingActionSlots)
+    ClearPendingActionRefresh()
     if clearOverrides then ClearMap(R.explicitOverrides) end
     SetGlow(false, true)
+end
+
+local function InvalidateObservedAssignments()
+    ClearMap(R.trackedButtons)
+    ClearButtonSlotIndex()
+    for item in pairs(R.cdmFrames) do
+        local state = R.frameState[item]
+        if state then state.assignmentReadable = false end
+        HideFrameGlow(item)
+    end
+end
+
+local function ResetAndRecover(reason)
+    ResetTransientState(true)
+    -- World/spec/secrecy transitions invalidate borrowed assignment identity
+    -- immediately. Keep discovered owners/hooks for recovery, but no stale
+    -- button slot or pooled CDM assignment may render before revalidation.
+    InvalidateObservedAssignments()
+    RebuildSpellFamilies()
+    if InCombat() then
+        -- Structural discovery is blocked, but already observed ordinary
+        -- assignments and proc state can be reconciled now. One full recovery
+        -- pass remains owned by combat exit.
+        RefreshAssignments()
+        ReconcileGlow(reason)
+        R.needsRescan = true
+        return
+    end
+    if not SDG:RequestRescan(reason, false) then
+        SDG:RescanButtons(false)
+        ReconcileGlow(reason)
+    end
 end
 
 local function StopRuntime()
@@ -1626,14 +1849,21 @@ function SDG:SetOption(key, value)
 end
 
 function SDG:TestGlow()
-    if not RuntimeEnabled() then Print("Enable the addon on a Death Knight to test the glow."); return end
+    if not RuntimeEnabled() then Print("Enable the addon on a Death Knight to test the glow."); return false end
     R.testUntil = Now() + 2
     ReconcileGlow("test")
-    ScheduleTimer("test", 2.05, function()
+    local scheduled = ScheduleTimer("test", 2.05, function()
         R.testUntil = 0
         ReconcileGlow("test-end")
     end)
+    if not scheduled then
+        R.testUntil = 0
+        ReconcileGlow("test-timer-failed")
+        Print("Test glow unavailable: timer scheduling failed")
+        return false
+    end
     Print("Test glow for 2 seconds")
+    return true
 end
 
 function SDG:OnLogin()
@@ -1652,7 +1882,9 @@ function SDG:OnLogin()
     end
     StartRuntime()
     if not next(R.trackedButtons) then
-        ScheduleTimer("login-retry", 0.35, function() self:RequestRescan("login-ready", false) end)
+        if not ScheduleTimer("login-retry", 0.35, function() self:RequestRescan("login-ready", false) end) then
+            self:RequestRescan("login-ready", false)
+        end
     end
 end
 
@@ -1682,11 +1914,7 @@ local function OnEvent(_, event, ...)
     elseif event == "PLAYER_REGEN_DISABLED" then
         ReconcileGlow(event)
     elseif event == "PLAYER_ENTERING_WORLD" then
-        ResetTransientState(true)
-        RebuildSpellFamilies()
-        RefreshAssignments()
-        SDG:RequestRescan(event, false)
-        ReconcileGlow(event)
+        ResetAndRecover(event)
     elseif event == "ADDON_LOADED" then
         local addonName = SafeString((...))
         if addonName and RELEVANT_ADDONS[addonName] then
@@ -1709,17 +1937,16 @@ local function OnEvent(_, event, ...)
             local unit = ...
             if SafeString(unit) ~= "player" then return end
         end
-        ResetTransientState(true)
-        RebuildSpellFamilies()
-        RefreshAssignments()
-        SDG:RequestRescan(event, false)
-        ReconcileGlow(event)
-    else
-        local changedSlot = event == "ACTIONBAR_SLOT_CHANGED" and SafeID((...)) or nil
+        ResetAndRecover(event)
+    elseif event == "ACTIONBAR_SLOT_CHANGED" then
+        local changedSlot, valid = ParseActionSlotEvent((...))
+        if not valid then return end
         if changedSlot then RefreshKnownButtons(changedSlot) end
-        -- One-slot changes stay targeted. Paging/modifier/vehicle and broad slot
-        -- invalidations collapse into one complete next-frame assignment pass.
         QueueActionRefresh(changedSlot)
+    else
+        -- Paging/modifier/vehicle and other broad assignment invalidations
+        -- collapse into one complete next-frame pass.
+        QueueActionRefresh(nil)
     end
 end
 
@@ -1777,11 +2004,16 @@ local function ToggleID(list, value, label)
         end
         list[#list + 1] = id
     end
-    RebuildSpellFamilies()
-    RefreshAssignments()
     local reason = label .. (added and "-added" or "-removed")
-    SDG:RequestRescan(reason, false)
-    ReconcileGlow(reason)
+    if InCombat() then
+        RebuildSpellFamilies()
+        RefreshAssignments()
+        ReconcileGlow(reason)
+        R.needsRescan = true
+    else
+        SDG:RescanButtons(false)
+        ReconcileGlow(reason)
+    end
     Print((added and "Added " or "Removed ") .. label .. " spellID " .. tostring(id))
     return true
 end
@@ -1804,8 +2036,11 @@ _G.SlashCmdList["SUDDEN_DOOM_GLOW"] = function(message)
         if not SDG:SetOption("debug", not DB.debug) then return end
         Print("Debug: " .. (DB.debug and "ON" or "OFF"))
     elseif command == "rescan" then
-        if SDG:RequestRescan("slash", argument:lower() == "deep") then
-            Print(InCombat() and "Rescan deferred until combat ends" or "Rescan queued")
+        local accepted, mode = SDG:RequestRescan("slash", argument:lower() == "deep")
+        if accepted then
+            if mode == "deferred" then Print("Rescan deferred until combat ends")
+            elseif mode == "completed" then Print("Rescan completed")
+            else Print("Rescan queued") end
         else
             Print("Rescan unavailable while the addon runtime is disabled.")
         end
@@ -1849,10 +2084,12 @@ end
 
 -- Normal login waits until every TOC file has loaded. A late load initializes
 -- through a one-shot callback, so Options.lua is available before registration.
-if type(_G.IsLoggedIn) == "function" and _G.IsLoggedIn() then
-    if C_Timer and type(C_Timer.After) == "function" then
-        C_Timer.After(0, function() SDG:OnLogin() end)
-    else
-        SDG:OnLogin()
+local isLoggedIn = _G.IsLoggedIn
+if type(isLoggedIn) == "function" then
+    local ok, loggedIn = pcall(isLoggedIn)
+    if ok and IsAccessible(loggedIn) and loggedIn == true then
+        local deferred = C_Timer and type(C_Timer.After) == "function"
+            and pcall(C_Timer.After, 0, function() SDG:OnLogin() end)
+        if not deferred then SDG:OnLogin() end
     end
 end

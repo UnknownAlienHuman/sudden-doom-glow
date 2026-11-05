@@ -8,6 +8,7 @@ local createdFrames = {}
 local messages = {}
 local actionCallbacks = {}
 local queryCalls = 0
+local actionSpellQueries = 0
 local cdmEnumerations = 0
 local unitEventRegistrations = 0
 local geometryMutations = 0
@@ -175,7 +176,20 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.6" or nil end }
+local loadedAddons = {
+    Blizzard_CooldownViewer = true,
+    Dominos = true,
+}
+local loadingAddons = {
+    Bartender4 = true,
+}
+C_AddOns = {
+    GetAddOnMetadata = function(_, field) return field == "Version" and "1.4.7" or nil end,
+    IsAddOnLoaded = function(addonName)
+        local loaded = loadedAddons[addonName] == true
+        return loaded or loadingAddons[addonName] == true, loaded
+    end,
+}
 local currentOverrideSpellID = 1242174
 C_Spell = {
     GetBaseSpell = function(spellID)
@@ -187,7 +201,10 @@ C_Spell = {
     end,
 }
 local actions = { [1] = 47541, [2] = 99999 }
-C_ActionBar = { GetSpell = function(slot) return actions[slot] end }
+C_ActionBar = { GetSpell = function(slot)
+    actionSpellQueries = actionSpellQueries + 1
+    return actions[slot]
+end }
 local overlayState = {}
 C_SpellActivationOverlay = {
     IsSpellOverlayed = function(spellID)
@@ -263,6 +280,10 @@ ActionButton2 = NewFrame("ActionButton2")
 ActionButton2.action = 2
 MultiBarRightActionButton1 = NewFrame("MultiBarRightActionButton1")
 MultiBarRightActionButton1.action = 1
+BT4Button1 = NewFrame("BT4Button1")
+BT4Button1.action = 1
+ElvUI_Bar1Button1 = NewFrame("ElvUI_Bar1Button1")
+ElvUI_Bar1Button1.action = 1
 
 Settings = { VarType = { Boolean = "boolean", Number = "number" } }
 local settingsCategory = { GetID = function() return 321 end }
@@ -313,6 +334,10 @@ assert(R.knownButtons[MultiBarRightActionButton1],
     "current Dominos compatibility-name button was not discovered")
 assert(R.frameState[MultiBarRightActionButton1] and R.frameState[MultiBarRightActionButton1].alert,
     "current Dominos compatibility-name button was not prepared before combat")
+assert(not R.knownButtons[BT4Button1] and not R.frameState[BT4Button1],
+    "loading-but-not-loaded Bartender4 family was scanned eagerly")
+assert(not R.knownButtons[ElvUI_Bar1Button1] and not R.frameState[ElvUI_Bar1Button1],
+    "unloaded ElvUI family was scanned eagerly")
 
 -- Object access must precede IsForbidden.
 local gateLog = {}
@@ -334,14 +359,38 @@ local hostileButton = setmetatable({ raiseTableAccess = false, tableAccessible =
 assert(pcall(actionCallbacks["ActionButton.OnActionChanged"].callback, nil, hostileButton),
     "foreign action-button member read escaped the adapter boundary")
 
+-- Access predicates are ordinary booleans, not truthy compatibility values.
+local malformedAccessButton = NewFrame("MalformedAccessButton")
+malformedAccessButton.action = 1
+function malformedAccessButton:CanBeAccessedInContext() return 1 end
+assert(pcall(actionCallbacks["ActionButton.OnActionChanged"].callback, nil, malformedAccessButton),
+    "malformed access predicate escaped the adapter boundary")
+assert(not R.trackedButtons[malformedAccessButton] and not R.buttonSlots[malformedAccessButton],
+    "malformed access predicate retained assignment ownership")
+local constrainedWithoutContext = {
+    action = 1,
+    HasAccessConstraints = function() return true end,
+    IsForbidden = function() return false end,
+}
+assert(pcall(actionCallbacks["ActionButton.OnActionChanged"].callback, nil, constrainedWithoutContext),
+    "constrained object without a current-access predicate escaped the adapter")
+assert(not R.trackedButtons[constrainedWithoutContext] and not R.buttonSlots[constrainedWithoutContext],
+    "constrained object without current access retained assignment ownership")
+
 -- A relevant SHOW payload is the best first query candidate. This preserves
 -- authoritative all-false reconciliation while avoiding a linear active scan.
 overlayState[450932] = true
 queryCalls = 0
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 450932)
 assert(queryCalls == 1, "relevant SHOW payload was not queried first")
+Advance(0.10)
+assert(queryCalls == 1, "authoritative positive SHOW scheduled a redundant delayed query")
 overlayState[450932] = false
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 450932)
+local queriesAfterAuthoritativeHide = queryCalls
+Advance(0.10)
+assert(queryCalls == queriesAfterAuthoritativeHide,
+    "authoritative all-false HIDE scheduled a redundant delayed query")
 Advance(0.3)
 
 overlayState[47541] = true
@@ -350,12 +399,25 @@ local preAccessState = assert(R.frameState[ActionButton1])
 assert(preAccessState.shown, "precondition: action alert did not show")
 assert(R.frameState[MultiBarRightActionButton1].shown,
     "current Dominos compatibility-name button did not receive the proc glow")
+local activeAlert = assert(preAccessState.alert)
+activeAlert.accessible = false
+Fire("PLAYER_REGEN_ENABLED")
+assert(not preAccessState.animating,
+    "active alert cached object access across an explicit lifecycle boundary")
+activeAlert.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(preAccessState.animating,
+    "active alert did not recover after current object access returned")
 ActionButton1.accessible = false
 actionCallbacks["ActionButton.OnActionChanged"].callback(nil, ActionButton1)
 assert(not preAccessState.shown, "unreadable reassignment left a stale action glow")
+assert(not R.trackedButtons[ActionButton1] and not R.buttonSlots[ActionButton1],
+    "unreadable reassignment retained stale assignment ownership")
 ActionButton1.accessible = true
 actionCallbacks["ActionButton.OnActionChanged"].callback(nil, ActionButton1)
 assert(preAccessState.shown, "readable reassignment did not restore the current target glow")
+assert(R.trackedButtons[ActionButton1] and R.buttonSlots[ActionButton1] == 1,
+    "readable reassignment did not restore assignment ownership")
 overlayState[47541] = false
 Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
 
@@ -364,9 +426,19 @@ local enumBefore = cdmEnumerations
 Fire("ADDON_LOADED", "TotallyUnrelatedAddon")
 Advance(0.2)
 assert(cdmEnumerations == enumBefore, "unrelated ADDON_LOADED triggered a rescan")
+loadingAddons.Bartender4 = nil
+loadedAddons.Bartender4 = true
 Fire("ADDON_LOADED", "Bartender4")
 Advance(0.2)
 assert(cdmEnumerations > enumBefore, "relevant ADDON_LOADED did not trigger recovery")
+assert(R.knownButtons[BT4Button1] and R.frameState[BT4Button1] and R.frameState[BT4Button1].alert,
+    "Bartender4 family was not discovered after its authoritative load event")
+loadedAddons.ElvUI = true
+Fire("ADDON_LOADED", "ElvUI")
+Advance(0.2)
+assert(R.knownButtons[ElvUI_Bar1Button1] and R.frameState[ElvUI_Bar1Button1]
+    and R.frameState[ElvUI_Bar1Button1].alert,
+    "ElvUI family was not discovered after its authoritative load event")
 local enumBeforeDataReady = cdmEnumerations
 Fire("COOLDOWN_VIEWER_DATA_LOADED")
 Advance(0.2)
@@ -378,19 +450,85 @@ ActionButton1.slotReadCount = 0
 ActionButton2.slotReadCount = 0
 MultiBarRightActionButton1.slotReadCount = 0
 queryCalls = 0
+actionSpellQueries = 0
 Fire("ACTIONBAR_SLOT_CHANGED", 1)
 assert(ActionButton1.slotReadCount > 0 and MultiBarRightActionButton1.slotReadCount > 0,
     "targeted slot refresh missed current slot owners")
 assert(ActionButton2.slotReadCount == 0,
     "one-slot invalidation scanned an unrelated known button")
+assert(actionSpellQueries == 1,
+    "one-slot invalidation queried the same action slot once per button")
 Advance(0)
 assert(ActionButton2.slotReadCount == 0,
     "deferred one-slot recovery became an unrelated full scan")
+assert(actionSpellQueries == 2,
+    "deferred one-slot recovery did not reuse one query per unique slot")
+
+-- Denied/malformed slot payloads are not equivalent to the explicit broad zero.
+ActionButton1.slotReadCount = 0
+ActionButton2.slotReadCount = 0
+Fire("ACTIONBAR_SLOT_CHANGED", secretValue)
+Fire("ACTIONBAR_SLOT_CHANGED", -1)
+Fire("ACTIONBAR_SLOT_CHANGED", 1.5)
+Advance(0)
+assert(ActionButton1.slotReadCount == 0 and ActionButton2.slotReadCount == 0,
+    "invalid ACTIONBAR_SLOT_CHANGED payload became a broad refresh")
+Fire("ACTIONBAR_SLOT_CHANGED", 0)
+Advance(0)
+assert(ActionButton1.slotReadCount > 0 and ActionButton2.slotReadCount > 0,
+    "explicit broad ACTIONBAR_SLOT_CHANGED(0) did not refresh known buttons")
+
+-- A settled rescan supersedes an already queued broad assignment pass.
+ActionButton1.slotReadCount = 0
+ActionButton2.slotReadCount = 0
+Fire("ACTIONBAR_PAGE_CHANGED")
+assert(R.timers["action-refresh"], "broad assignment refresh was not queued")
+assert(SDG:RequestRescan("test-supersedes-action-refresh", false))
+assert(not R.timers["action-refresh"], "settled rescan retained redundant assignment work")
+Advance(0.2)
+assert(ActionButton1.slotReadCount == 1 and ActionButton2.slotReadCount == 1,
+    "rescan plus queued assignment owner performed duplicate full passes")
+
+-- World entry similarly owns one settled pass instead of one immediate pass plus rescan.
+ActionButton1.slotReadCount = 0
+ActionButton2.slotReadCount = 0
+Fire("PLAYER_ENTERING_WORLD")
+assert(ActionButton1.slotReadCount == 0 and ActionButton2.slotReadCount == 0,
+    "world-entry reset performed assignment work before its settled rescan")
+assert(not next(R.trackedButtons) and not next(R.buttonSlots),
+    "world-entry reset retained stale action assignment ownership")
+assert(R.frameState[cdmItem] and R.frameState[cdmItem].assignmentReadable == false,
+    "world-entry reset retained stale Cooldown Viewer assignment authority")
+assert(R.targetFamily[47541] and R.signalFamily[450932],
+    "world-entry reset did not rebuild bounded configured spell families")
+Advance(0.2)
+assert(ActionButton1.slotReadCount == 1 and ActionButton2.slotReadCount == 1,
+    "world-entry recovery performed more than one full assignment pass")
+assert(R.trackedButtons[ActionButton1] and R.frameState[cdmItem].assignmentReadable == true,
+    "settled world-entry recovery did not restore current assignments")
+
+queryCalls = 0
 Fire("ACTIONBAR_PAGE_CHANGED")
 Advance(0)
 assert(ActionButton2.slotReadCount > 0,
     "coalesced broad assignment recovery did not run")
 assert(queryCalls == 0, "action events queried independent proc state")
+
+-- An opaque HIDE remains a wake-up only while evidence is active; it is never
+-- indexed or compared as a spell ID.
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+overlayState[47541] = false
+queryCalls = 0
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", secretValue)
+assert(queryCalls == 0, "opaque HIDE payload was queried synchronously")
+Advance(0.25)
+assert(queryCalls > 0 and not R.glowActive,
+    "opaque HIDE did not wake authoritative candidate reconciliation after grace")
+queryCalls = 0
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 999999)
+Advance(0.10)
+assert(queryCalls == 0, "irrelevant HIDE woke the query while no evidence was active")
 
 -- A CDM table hotfix must not toggle an already active glow or restart art.
 overlayState[47541] = true
@@ -500,10 +638,38 @@ ActionButton2.Icon = replacementTarget
 SDG:RescanButtons(false)
 assert(dormantState.renderTarget == replacementTarget and dormantAlert.parent == replacementTarget,
     "render-target replacement reused stale geometry")
+local staleTargetMutationCount = geometryMutations
+iconTarget.hooks.OnSizeChanged()
+assert(geometryMutations == staleTargetMutationCount,
+    "stale render-target hook mutated the current surface")
 local stableGeometryMutations = geometryMutations
 SDG:RescanButtons(false)
 assert(geometryMutations == stableGeometryMutations,
     "stable rescan repeated completed geometry mutations")
+
+-- An assigned but temporarily inaccessible icon target is incomplete evidence;
+-- it must never make the alert fall back to the parent button.
+local deniedTargetMutationCount = geometryMutations
+replacementTarget.accessible = false
+SDG:RescanButtons(false)
+assert(dormantAlert.parent == replacementTarget,
+    "inaccessible render target silently reparented the alert to its button")
+assert(not dormantState.geometryReady and R.needsGeometry,
+    "inaccessible render target retained stale geometry readiness")
+assert(geometryMutations == deniedTargetMutationCount,
+    "inaccessible render target caused structural fallback mutations")
+replacementTarget.accessible = true
+Fire("PLAYER_REGEN_ENABLED")
+assert(dormantState.geometryReady and dormantAlert.parent == replacementTarget,
+    "render target did not recover after current access returned")
+
+replacementTarget.width = 46
+R.needsGeometry = false
+local currentTargetMutationCount = geometryMutations
+replacementTarget.hooks.OnSizeChanged()
+assert(geometryMutations > currentTargetMutationCount and dormantState.geometryReady
+    and not R.needsGeometry,
+    "successful current-target size refresh left global geometry recovery dirty")
 
 -- A global geometry change cannot be written into an inaccessible frame-keyed
 -- state. The generation token must invalidate it when access returns.
@@ -542,6 +708,20 @@ assert(R.cdmFrames[cdmItem], "failed viewer pool access probe pruned tracked ite
 UtilityCooldownViewer.itemFramePool.raiseTableAccess = nil
 activeEssential[1] = cdmItem
 
+-- Current viewer access must be established before any other foreign member is
+-- inspected. A denied viewer is incomplete evidence, not an adapter exception.
+local savedDeniedViewer = UtilityCooldownViewer
+local deniedViewer = setmetatable({ tableAccessible = true }, {
+    __index = function(_, key)
+        if key == "CanBeAccessedInContext" then return function() return false end end
+        error("denied viewer member read")
+    end,
+})
+UtilityCooldownViewer = deniedViewer
+assert(pcall(SDG.RescanButtons, SDG, false),
+    "viewer member lookup happened before the current-access gate")
+UtilityCooldownViewer = savedDeniedViewer
+
 -- Foreign hook installation is an error boundary: failed hooks do not escape or
 -- become false-positive registrations, and a later lifecycle pass retries them.
 local savedUtilityViewer = UtilityCooldownViewer
@@ -550,8 +730,10 @@ flakyViewer.hookFailures = { OnAcquireItemFrame = 1 }
 UtilityCooldownViewer = flakyViewer
 assert(pcall(SDG.RescanButtons, SDG, false), "viewer hook failure escaped recovery")
 assert(not R.cdmViewerHooks[flakyViewer], "failed viewer hook was marked installed")
+assert(R.needsRescan, "failed viewer hook did not retain lifecycle recovery ownership")
 SDG:RescanButtons(false)
-assert(R.cdmViewerHooks[flakyViewer], "viewer hook was not retried after failure")
+assert(R.cdmViewerHooks[flakyViewer] and not R.needsRescan,
+    "viewer hook was not retried to a complete generation")
 UtilityCooldownViewer = savedUtilityViewer
 
 -- Enabling CDM in combat must not enumerate pools or attach a newly observed item.
@@ -573,13 +755,34 @@ assert(ActionButton1.slotReadCount == 0 and ActionButton2.slotReadCount == 0,
 Advance(0.2)
 assert(ActionButton1.slotReadCount > 0 and ActionButton2.slotReadCount > 0,
     "settled post-combat rescan did not refresh assignments")
-assert(cdmEnumerations > enumAtCombat and R.cdmFrames[newItem] and R.cdmItemHooks[newItem],
-    "post-combat CDM recovery did not attach the new item")
+assert(cdmEnumerations > enumAtCombat and R.cdmItemHooks[newItem],
+    "post-combat CDM recovery did not inspect the new item")
 assert(not R.cdmItemHooks[newItem].SetCooldownID,
     "failed item hook was marked installed")
+assert(not R.cdmFrames[newItem]
+    and (not R.frameState[newItem] or R.frameState[newItem].assignmentReadable ~= true),
+    "partially hooked Cooldown Viewer item retained render authority")
+assert(R.needsRescan, "failed item hook did not retain lifecycle recovery ownership")
 SDG:RescanButtons(false)
-assert(R.cdmItemHooks[newItem].SetCooldownID,
-    "item hook was not retried after failure")
+assert(R.cdmItemHooks[newItem].SetCooldownID and R.cdmFrames[newItem]
+    and R.frameState[newItem].assignmentReadable == true,
+    "item hook was not retried before assignment authority was restored")
+
+-- Every selected lifecycle method is mandatory. A known-missing method is not
+-- permission to render a pooled item whose future reset cannot be observed.
+local incompleteItem = NewCDMItem("IncompleteCDMItem", 47541)
+local savedResetCooldownData = incompleteItem.ResetCooldownData
+incompleteItem.ResetCooldownData = nil
+activeEssential[1] = incompleteItem
+SDG:RescanButtons(false)
+assert(not R.cdmFrames[incompleteItem]
+    and (not R.frameState[incompleteItem] or R.frameState[incompleteItem].assignmentReadable ~= true),
+    "item with an incomplete reset contract retained render authority")
+incompleteItem.ResetCooldownData = savedResetCooldownData
+SDG:RescanButtons(false)
+assert(R.cdmFrames[incompleteItem] and R.cdmItemHooks[incompleteItem].ResetCooldownData,
+    "completed item lifecycle was not recovered on a later pass")
+activeEssential[1] = newItem
 
 -- Unsupported future schemas must refuse all spell-list commands explicitly.
 R.unsupportedSchema = true
@@ -594,6 +797,17 @@ R.unsupportedSchema = false
 local beforeSecretPrint = #messages
 assert(pcall(SDG.Print, SDG, secretValue), "secret diagnostic value raised")
 assert(#messages == beforeSecretPrint, "secret diagnostic value was printed")
+local savedChatFrame = DEFAULT_CHAT_FRAME
+DEFAULT_CHAT_FRAME = setmetatable({
+    CanBeAccessedInContext = function() return true end,
+}, {
+    __index = function() error("hostile chat-frame member read") end,
+})
+assert(pcall(SDG.Print, SDG, "guarded chat output"),
+    "hostile chat-frame member read escaped diagnostics")
+assert(#messages == beforeSecretPrint,
+    "unverified chat frame received diagnostic output")
+DEFAULT_CHAT_FRAME = savedChatFrame
 
 -- Disabled runtimes report rescan refusal instead of a false queued message.
 assert(SDG:SetOption("enabled", false))
@@ -636,6 +850,69 @@ assert(R.buttonSlots[variantButton] == 1220 and R.buttonsBySlot[1220][variantBut
     "button slot index did not retain the latest assignment")
 assert(not R.buttonsBySlot[1001], "button slot index retained an obsolete empty set")
 
+-- Timer ownership remains correct when NewTimer returns an inaccessible handle,
+-- falls back to After, or every timer constructor rejects the request.
+local savedNewTimer = C_Timer.NewTimer
+local savedAfter = C_Timer.After
+C_Timer.NewTimer = function(delay, callback)
+    savedNewTimer(delay, callback)
+    return secretValue
+end
+ActionButton1.slotReadCount = 0
+local accepted, mode = SDG:RequestRescan("inaccessible-timer-handle", false)
+assert(accepted and mode == "queued" and R.timers.rescan and not R.timers.rescan.handle,
+    "successful timer with inaccessible handle lost logical ownership")
+Advance(0.2)
+assert(ActionButton1.slotReadCount > 0 and not R.timers.rescan,
+    "identity-owned timer with inaccessible handle did not complete")
+
+C_Timer.NewTimer = function() error("timer creation failed") end
+ActionButton1.slotReadCount = 0
+accepted, mode = SDG:RequestRescan("timer-after-fallback", false)
+assert(accepted and mode == "queued" and R.timers.rescan,
+    "NewTimer failure did not fall back to cancellable identity-owned After work")
+Advance(0.2)
+assert(ActionButton1.slotReadCount > 0 and not R.timers.rescan,
+    "After fallback did not complete the required rescan")
+
+C_Timer.After = function() error("after creation failed") end
+ActionButton1.slotReadCount = 0
+accepted, mode = SDG:RequestRescan("timer-synchronous-fallback", false)
+assert(accepted and mode == "completed" and ActionButton1.slotReadCount > 0,
+    "total timer failure dropped required rescan recovery")
+assert(not R.timers.rescan and R.rescanReason == nil and not R.rescanDeep,
+    "synchronous rescan fallback retained stale timer ownership")
+
+ActionButton1.slotReadCount = 0
+Fire("ACTIONBAR_PAGE_CHANGED")
+assert(ActionButton1.slotReadCount > 0 and not R.timers["action-refresh"]
+    and not R.actionRefreshAll and not next(R.pendingActionSlots),
+    "timer failure stranded broad assignment recovery")
+
+queryCalls = 0
+overlayState[47541] = false
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(not R.eventSignals[47541] and not R.glowActive,
+    "event-only evidence survived without both bounded terminal timers")
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", secretValue)
+assert(queryCalls > 0, "opaque wake-up was dropped when delayed timer construction failed")
+
+overlayState[47541] = true
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_SHOW", 47541)
+assert(R.glowActive and R.lastQueryActiveAt, "precondition: positive query was not retained")
+local savedOverlayQuery = C_SpellActivationOverlay.IsSpellOverlayed
+C_SpellActivationOverlay.IsSpellOverlayed = function() return secretValue end
+Fire("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE", 47541)
+assert(not R.glowActive and R.lastQueryActiveAt == nil and not R.timers["query-expire"],
+    "positive query evidence survived without a terminal expiry owner")
+C_SpellActivationOverlay.IsSpellOverlayed = savedOverlayQuery
+overlayState[47541] = false
+assert(SDG:TestGlow() == false and R.testUntil == 0 and not R.glowActive,
+    "test glow remained active after terminal timer failure")
+
+C_Timer.NewTimer = savedNewTimer
+C_Timer.After = savedAfter
+
 -- A full legacy list plus seeded defaults must still respect the hard bound.
 assert(SDG:SetOption("enabled", false))
 local legacyTargets, legacySignals = {}, {}
@@ -659,4 +936,4 @@ assert(#SuddenDoomGlowDB.targetSpellIDs == 32,
 assert(#SuddenDoomGlowDB.signalSpellIDs == 32,
     "legacy signal defaults exceeded the configured ID bound")
 
-print("runtime regression 1.4.6: PASS")
+print("runtime regression 1.4.7: PASS")

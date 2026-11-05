@@ -17,9 +17,9 @@ The complete `70688 → 70783` delta does not change the ActionBar, Spell Activa
 
 `ActionBarFrameDocumentation.lua` defines `C_ActionBar.GetSpell(actionID)` under its caller policy. A failed or inaccessible lookup remains unknown. The fallback is limited to the current observed action and resolved `GetMacroSpell`; macro text is never parsed.
 
-The generated Cooldown Viewer contract defines synchronous data-loaded, spell-override, and table-hotfix events. Blizzard Settings exposes `RegisterAddOnSetting`, and `SettingMixin` emits value callbacks after the authoritative field write.
+`C_AddOns.IsAddOnLoaded(name)` returns `(loadedOrLoading, loaded)`; this current-Retail adapter accepts only the exact second ordinary `loaded == true` result. The generated Cooldown Viewer contract defines synchronous data-loaded, spell-override, and table-hotfix events. Blizzard Settings exposes `RegisterAddOnSetting`, and `SettingMixin` emits value callbacks after the authoritative field write.
 
-All secret-capable values are gated before comparison, type/nil tests, conversion, formatting, indexing, storage, logging, or deferral. Foreign object/table member discovery is also an access operation: the container/table is gated, indexing is isolated with `pcall`, the returned member is gated, and invocation has its own error boundary.
+All secret-capable values are gated before comparison, type/nil tests, conversion, formatting, indexing, storage, logging, or deferral. Foreign object/table member discovery is also an access operation: the container/table is gated, indexing is isolated with `pcall`, the returned member is gated, and invocation has its own error boundary. Access-policy methods are accepted only when they return ordinary booleans; a conditionally constrained object requires an affirmative `CanBeAccessedInContext()` result.
 
 ## Private implementation boundaries
 
@@ -31,9 +31,10 @@ The addon creates an addon-owned child from `ActionButtonSpellAlertTemplate` and
 
 The selected source supplies four viewer instances, active `itemFramePool` objects, `OnAcquireItemFrame`, and item lifecycle methods (`SetCooldownID`, `SetOverrideSpell`, `ClearCooldownID`, `ResetCooldownData`). The adapter:
 
+- verifies that `Blizzard_CooldownViewer` is fully loaded and the viewer is currently usable before reading its acquire method or pool;
 - never reads a viewer, pool, item, or method through an unguarded foreign member access;
 - hooks actual instances once and only outside combat;
-- treats post-hook installation as a fallible foreign boundary, records success only after the hook is installed, and retries only on a later lifecycle pass;
+- treats post-hook installation as a fallible foreign boundary, requires the viewer acquire hook plus every selected item lifecycle hook before rendering, records only completed hooks, and retries only on a later lifecycle pass;
 - enumerates pools only for bounded setup/recovery;
 - reads configured `GetBaseSpellID` only;
 - clears on proved reset/reassignment;
@@ -48,9 +49,15 @@ The selected source supplies four viewer instances, active `itemFramePool` objec
 
 SavedVariables accept at most 32 configured target IDs and 32 configured signal IDs. Runtime replacement expansion has a separate 128-ID cap per resolved family. Explicit configured signal aliases are inserted first so learned target variants cannot evict proc-authority candidates.
 
-Known buttons maintain one weak reverse action-slot index. `ACTIONBAR_SLOT_CHANGED(slot > 0)` updates only that slot's current owners immediately and in one coalesced targeted retry. Page, modifier, vehicle, override, macro, and broad slot invalidations share one complete next-frame pass. A required post-combat structural rescan replaces, rather than follows, a duplicate complete assignment pass. Proc-state queries remain independent from assignment events. Relevant SHOW payloads and the last positive candidate are ordering hints only; they reduce active-path reads but never authorize OFF before the complete readable candidate set is false.
+Known buttons maintain one weak reverse action-slot index. `ACTIONBAR_SLOT_CHANGED(slot > 0)` updates only that slot's current owners immediately and in one coalesced targeted retry. The exact zero payload is the only broad slot invalidation; denied, nonintegral, negative, or malformed payloads perform no assignment work. One assignment pass queries each unique slot once and shares the result across its current button owners. Page, modifier, vehicle, override, and macro invalidations share one complete next-frame pass. A scheduled settled rescan cancels and replaces duplicate complete assignment work, including world/spec/secrecy recovery. Proc-state queries remain independent from assignment events. Relevant SHOW payloads and the last positive candidate are ordering hints only; decisive immediate reads avoid redundant delayed queries but never authorize OFF before the complete readable candidate set is false. Opaque payloads remain bounded wake-ups and never become spell IDs.
 
-Alert geometry is complete only after foreign-member discovery, parent, anchors/size, frame-level read/write, and the current render target's size hook succeed. A temporary access, lookup, or mutation failure remains dirty. Global geometry settings replace a runtime generation token, so a surface inaccessible during the change must reconcile before reusing readiness. Stable lifecycle scans do not repeat completed geometry mutations.
+Alert geometry is complete only after foreign-member discovery, parent, anchors/size, frame-level read/write, and the current render target's size hook succeed. If an assigned icon target exists but is currently inaccessible, the adapter returns unavailable rather than silently using the parent button. A temporary access, lookup, or mutation failure remains dirty. Global geometry settings replace a runtime generation token, so a surface inaccessible during the change must reconcile before reusing readiness. Stale hooks from a replaced render target cannot mutate the current surface, while a successful current-target size callback resolves synchronously without leaving a false global dirty flag. Already-active alerts also revalidate their current animation objects at lifecycle boundaries. Stable lifecycle scans do not repeat completed geometry mutations.
+
+## Deferred-work ownership
+
+`C_Timer.NewTimer` is cancel-before-replace when its callback object is readable. A successful call with an unreadable handle remains logically cancellable through an ordinary owner token. Construction failure falls back to identity-gated `C_Timer.After`; if no timer path exists, required rescans/assignment reconciliation run once synchronously, while event/query/test evidence is cleared conservatively. No timer failure may leave permanent ON state or false queued ownership.
+
+World/spec/secrecy resets cancel transient evidence, hide current output, clear the reverse button-slot index, and mark observed Cooldown Viewer assignments unreadable before rebuilding bounded families. Current provider state alone may restore authority. Diagnostic chat output and debug refresh callback access use the same fail-closed member/owner discipline.
 
 ## External implementation evidence
 

@@ -1,6 +1,6 @@
 # Donor implementation review
 
-Reviewed and branch-head rechecked 2026-11-04 for release 1.4.6. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
+Reviewed and branch-head rechecked 2026-11-04 for release 1.4.7. These repositories are implementation evidence only. Blizzard source plus the engineering knowledge base remain authoritative for API, security, combat, and ownership decisions. No donor code or assets were copied.
 
 ## Pins
 
@@ -28,14 +28,14 @@ Sudden Doom Glow keeps current assignment resolution authoritative and does not 
 
 ### Foreign access transitions
 
-The current `interrupt-glow` implementation treats foreign member lookup, current object permission, and the final visual mutation as separate gates. Denied visuals sleep until an explicit provider/restriction/lifecycle transition rather than retrying from a ticker.
+The current `interrupt-glow` implementation treats foreign member lookup, current object permission, and the final visual mutation as separate gates. Access predicates must be ordinary booleans; denied visuals sleep until an explicit provider/restriction/lifecycle transition rather than retrying from a ticker.
 
-Sudden Doom Glow transfers that decision, not its module structure: action buttons, render targets, animations, Cooldown Viewer instances, pools, and hook methods are read through one access-gated member boundary. Failed reads do not become cached success, and geometry remains dirty until a later authoritative pass completes every required operation.
+Sudden Doom Glow transfers that decision, not its module structure: action buttons, render targets, animations, Cooldown Viewer instances, pools, and hook methods are read through one access-gated member boundary. Failed reads do not become cached success, conditionally constrained objects require current access, and geometry remains dirty until a later authoritative pass completes every required operation.
 
 ### Exact third-party button families
 
-- Bartender4 creates `BT4Button1..180`; the existing named adapter is correct.
-- ElvUI creates buttons as `ElvUI_Bar<bar>Button<slot>`; the existing adapter is correct.
+- Bartender4 creates `BT4Button1..180`; the existing named adapter is correct and is scanned only after Bartender4 is fully loaded.
+- ElvUI creates buttons as `ElvUI_Bar<bar>Button<slot>`; the existing adapter is correct and is scanned only after ElvUI is fully loaded.
 - Dominos uses both `DominosActionButtonN` and compatibility names such as `MultiBarRightActionButtonN`, `MultiBarBottomLeftActionButtonN`, and `MultiBar5ActionButtonN`. Version 1.4.3 did not enumerate the latter families. Version 1.4.4 adds those exact current names so their alert surfaces can be prepared outside combat without requiring a global frame scan.
 
 ### Why LibCustomGlow is not embedded

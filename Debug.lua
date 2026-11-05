@@ -16,8 +16,22 @@ local deferFrame
 SDG.DebugUI = SDG.DebugUI or {}
 local UI = SDG.DebugUI
 
+local function CanAccess(value)
+    if type(_G.canaccessvalue) == "function" then
+        local ok, accessible = pcall(_G.canaccessvalue, value)
+        return ok and accessible == true
+    end
+    if type(_G.issecretvalue) == "function" then
+        local ok, secret = pcall(_G.issecretvalue, value)
+        return ok and secret ~= true
+    end
+    return true
+end
+
 local function InCombat()
-    return type(_G.InCombatLockdown) == "function" and _G.InCombatLockdown()
+    if type(_G.InCombatLockdown) ~= "function" then return false end
+    local ok, locked = pcall(_G.InCombatLockdown)
+    return ok and CanAccess(locked) and locked == true
 end
 
 local function SafePrint(message)
@@ -25,13 +39,7 @@ local function SafePrint(message)
 end
 
 local function SafeMessage(value)
-    if type(_G.canaccessvalue) == "function" then
-        local ok, accessible = pcall(_G.canaccessvalue, value)
-        if not ok or not accessible then return nil end
-    elseif type(_G.issecretvalue) == "function" then
-        local ok, secret = pcall(_G.issecretvalue, value)
-        if not ok or secret then return nil end
-    end
+    if not CanAccess(value) then return nil end
     local kind = type(value)
     if kind ~= "string" and kind ~= "number" and kind ~= "boolean" then return nil end
     return tostring(value)
@@ -42,10 +50,15 @@ local function IsVisible()
 end
 
 local function CancelRefresh()
-    if refreshTimer and type(refreshTimer.Cancel) == "function" then
-        refreshTimer:Cancel()
-    end
+    local owner = refreshTimer
     refreshTimer = nil
+    if not owner then return end
+    local handle = owner.handle
+    if not CanAccess(handle) or handle == nil then return end
+    local ok, cancel = pcall(function() return handle.Cancel end)
+    if ok and CanAccess(cancel) and type(cancel) == "function" then
+        pcall(cancel, handle)
+    end
 end
 
 local function RefreshText()
@@ -60,12 +73,27 @@ end
 
 local function ScheduleRefresh()
     if not IsVisible() or refreshTimer then return end
-    local timers = _G.C_Timer
-    if timers and type(timers.NewTimer) == "function" then
-        refreshTimer = timers.NewTimer(0.05, RefreshText)
-    else
+    local owner = {}
+    refreshTimer = owner
+    local function Run()
+        if refreshTimer ~= owner then return end
+        refreshTimer = nil
         RefreshText()
     end
+
+    local timers = _G.C_Timer
+    if timers and type(timers.NewTimer) == "function" then
+        local ok, handle = pcall(timers.NewTimer, 0.05, Run)
+        if ok then
+            if refreshTimer == owner and CanAccess(handle) and handle ~= nil then
+                owner.handle = handle
+            end
+            return
+        end
+    end
+
+    if refreshTimer == owner then refreshTimer = nil end
+    RefreshText()
 end
 
 local function EnsureDeferredWorkFrame()
@@ -191,10 +219,19 @@ function UI:Create()
     rescan:SetPoint("LEFT", clear, "RIGHT", 10, 0)
     rescan:SetText("Deep rescan")
     rescan:SetScript("OnClick", function()
-        if type(SDG.RequestRescan) == "function" and SDG:RequestRescan("debug-ui", true) then
-            SafePrint(InCombat() and "Deep rescan deferred until combat ends" or "Deep rescan queued")
-        else
+        if type(SDG.RequestRescan) ~= "function" then
             SafePrint("Deep rescan unavailable while the addon runtime is disabled.")
+            return
+        end
+        local accepted, mode = SDG:RequestRescan("debug-ui", true)
+        if not accepted then
+            SafePrint("Deep rescan unavailable while the addon runtime is disabled.")
+        elseif mode == "deferred" then
+            SafePrint("Deep rescan deferred until combat ends")
+        elseif mode == "completed" then
+            SafePrint("Deep rescan completed")
+        else
+            SafePrint("Deep rescan queued")
         end
     end)
 

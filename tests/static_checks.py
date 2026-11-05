@@ -15,7 +15,7 @@ def metadata(name: str) -> str:
 interface = int(metadata("Interface"))
 assert interface == 120105, f"unexpected Retail 12.1.5 interface: {interface}"
 version = metadata("Version")
-assert version == "1.4.6", f"unexpected addon version: {version!r}"
+assert version == "1.4.7", f"unexpected addon version: {version!r}"
 assert metadata("OptionalDeps") == "Blizzard_CooldownViewer"
 assert metadata("SavedVariables") == "SuddenDoomGlowDB"
 
@@ -33,6 +33,10 @@ runtime_names = [path.name for path in runtime_files]
 assert runtime_names == ["Core.lua", "Debug.lua", "Options.lua"], runtime_names
 assert len(runtime_names) == len(set(runtime_names))
 
+mutation_checks = root / "tests" / "mutation_checks.py"
+if (root / "tests").is_dir():
+    assert mutation_checks.is_file(), "missing mutation sensitivity checks"
+
 sources = {path.name: path.read_text(encoding="utf-8") for path in runtime_files}
 all_runtime = "\n".join(sources.values())
 core = sources["Core.lua"]
@@ -49,8 +53,15 @@ for token in (
     "ActionButtonSpellAlertTemplate",
     "MAX_CONFIGURED_SPELL_IDS = 32",
     "MAX_RESOLVED_SPELL_IDS = 128",
+    "ParseActionSlotEvent",
+    "ReadOptionalBooleanMethod",
+    "IsAddOnFullyLoaded",
     "buttonsBySlot",
     "QueueActionRefresh",
+    "ClearPendingActionRefresh",
+    "FlushPendingActionRefresh",
+    "CompleteRescanRequest",
+    "InvalidateObservedAssignments",
     "MultiBarRightActionButton",
     "MultiBarBottomLeftActionButton",
     "QueueMappingRecovery",
@@ -90,6 +101,10 @@ assert not re.search(r"SetScript\(\s*[\"']OnUpdate", all_runtime), "polling OnUp
 # with no file-scope construction.
 assert debug.count("EnsureDeferredWorkFrame()") == 2, "debug defer owner is eager or duplicated"
 assert options.count("EnsureDeferredWorkFrame()") == 2, "settings defer owner is eager or duplicated"
+assert "pcall(timers.NewTimer, 0.05, Run)" in debug
+assert "refreshTimer = owner" in debug and "if refreshTimer ~= owner then return end" in debug
+assert "pcall(cancel, handle)" in debug
+assert "refreshTimer = timers.NewTimer" not in debug
 
 safe_number = re.search(r"local function SafeNumber\(value\)(.*?)\nend", core, re.DOTALL)
 assert safe_number
@@ -115,12 +130,32 @@ assert "pcall(ReadIndex, container, key)" in body
 merge_defaults = re.search(r"local function MergeNumericDefaults\(destination, defaults\)(.*?)\nend", core, re.DOTALL)
 assert merge_defaults and "#result >= MAX_CONFIGURED_SPELL_IDS" in merge_defaults.group(1)
 
-frame_gate = re.search(r"local function FrameCanBeUsed\(frame\)(.*?)\nend", core, re.DOTALL)
+frame_gate = re.search(r"FrameCanBeUsed = function\(frame\)(.*?)\nend", core, re.DOTALL)
 assert frame_gate
 body = frame_gate.group(1)
 assert 0 <= body.find("CanBeAccessedInContext") < body.find("IsForbidden"), (
     "current-context access must precede other object probes"
 )
+assert "HasAccessConstraints" in body and "accessible ~= true" in body, (
+    "conditionally constrained objects must require an affirmative current-access result"
+)
+
+optional_boolean = re.search(
+    r"local function ReadOptionalBooleanMethod\(container, methodName\)(.*?)\nend",
+    core,
+    re.DOTALL,
+)
+assert optional_boolean and 'type(value) ~= "boolean"' in optional_boolean.group(1), (
+    "object policy predicates must be ordinary booleans"
+)
+
+slot_payload = re.search(r"local function ParseActionSlotEvent\(value\)(.*?)\nend", core, re.DOTALL)
+assert slot_payload
+body = slot_payload.group(1)
+assert body.find("IsAccessible(value)") < body.find("type(value)"), (
+    "slot event payload must be gated before evaluation"
+)
+assert "if value == 0 then return nil, true end" in body
 
 assert 'elseif event == "ADDON_LOADED"' in core and "RELEVANT_ADDONS[addonName]" in core
 assert 'elseif event == "COOLDOWN_VIEWER_TABLE_HOTFIXED" then' in core
@@ -152,9 +187,22 @@ body = targeted_refresh.group(1)
 assert "R.buttonsBySlot[changedSlot]" in body and body.find("if changedSlot then") < body.find("R.knownButtons"), (
     "one-slot refresh must use the reverse slot index before any broad known-button pass"
 )
+assert "matchesBySlot" in body, "one assignment pass must query each unique slot at most once"
 
 queue_refresh = re.search(r"local function QueueActionRefresh\(changedSlot\)(.*?)\nend", core, re.DOTALL)
 assert queue_refresh and "R.pendingActionSlots[changedSlot]" in queue_refresh.group(1)
+assert "R.timers.rescan" in queue_refresh.group(1), (
+    "a queued settled rescan must supersede another complete assignment pass"
+)
+
+request_rescan = re.search(r"function SDG:RequestRescan\(reason, deep\)(.*?)\nend", core, re.DOTALL)
+assert request_rescan
+body = request_rescan.group(1)
+assert body.find("ClearPendingActionRefresh()") < body.find("R.timers.rescan"), (
+    "rescan ownership must cancel pending assignment work before coalescing"
+)
+assert 'if scheduled then return true, "queued" end' in body
+assert 'CompleteRescanRequest(self, reason)' in body and 'return true, "completed"' in body
 
 regen_branch = re.search(
     r'elseif event == "PLAYER_REGEN_ENABLED" then(.*?)elseif event == "PLAYER_REGEN_DISABLED"',
@@ -169,8 +217,24 @@ assert body.find("if R.needsRescan then") < body.find("RefreshAssignments()"), (
 
 assert 'pcall(hooksecurefunc, frame, name' in core
 assert 'pcall(hooksecurefunc, viewer, "OnAcquireItemFrame"' in core
-assert "if ok then hooked[name] = true end" in core
-assert "if hooked then R.cdmViewerHooks[viewer] = true end" in core
+item_hooks = re.search(r"local function HookCDMItem\(frame\)(.*?)\nend", core, re.DOTALL)
+assert item_hooks
+body = item_hooks.group(1)
+assert "if not ok then" in body and "SuspendCDMFrame(frame)" in body
+assert body.find("if not ok then") < body.find("hooked[name] = true"), (
+    "failed item hooks must not restore assignment authority"
+)
+assert "return true" in body
+assert "if hooked then" in core and "R.cdmViewerHooks[viewer] = true" in core
+assert "allReadable = false" in core and "R.needsRescan = true" in core
+
+cdm_reconcile = re.search(r"local function ReconcileCDMFrames\(\)(.*?)\nend", core, re.DOTALL)
+assert cdm_reconcile
+body = cdm_reconcile.group(1)
+assert body.find("FrameCanBeUsed(viewer)") < body.find('ReadMember(viewer, "OnAcquireItemFrame")'), (
+    "viewer current access must precede foreign acquire-method lookup"
+)
+assert 'IsAddOnFullyLoaded("Blizzard_CooldownViewer")' in body
 
 geometry = re.search(
     r"local function RefreshAlertGeometry\(frame, state, resolvedTarget\)(.*?)\nend",
@@ -185,6 +249,9 @@ assert body.count("MarkGeometryDirty(state)") >= 6, (
 )
 assert 'ReadMember(target, "GetFrameLevel")' in body
 assert "state.geometryToken = R.geometryToken" in body
+assert "if state.renderTarget ~= target then return end" in body, (
+    "stale size hooks must not mutate the current render target"
+)
 
 prime_geometry = re.search(r"local function PrimeTrackedAlerts\(forceGeometry\)(.*?)\nend", core, re.DOTALL)
 assert prime_geometry
@@ -196,6 +263,64 @@ assert "RefreshAlertGeometry(" not in body, (
 
 query_overlay = re.search(r"local function QueryOverlayState\(\)(.*?)\nend", core, re.DOTALL)
 assert query_overlay and "R.queryHintSpellID" in query_overlay.group(1)
+
+show_handler = re.search(r"local function HandleOverlayShow\(spellID\)(.*?)\nend", core, re.DOTALL)
+hide_handler = re.search(r"local function HandleOverlayHide\(spellID\)(.*?)\nend", core, re.DOTALL)
+assert show_handler and hide_handler
+assert 'R.lastDetection ~= "overlay-query"' in show_handler.group(1)
+assert "R.glowActive or not R.overlayQueryAuthoritative" in hide_handler.group(1)
+
+named_mapping = re.search(r"local function MapNamedButtons\(\)(.*?)\nend", core, re.DOTALL)
+assert named_mapping
+body = named_mapping.group(1)
+assert "IsAddOnFullyLoaded(provider)" in body and 'IsAddOnFullyLoaded("ElvUI")' in body
+
+timer_scheduler = re.search(r"local function ScheduleTimer\(key, delay, callback\)(.*?)\nend", core, re.DOTALL)
+assert timer_scheduler
+body = timer_scheduler.group(1)
+assert "pcall(C_Timer.NewTimer, delay, Run)" in body
+assert "pcall(C_Timer.After, delay, Run)" in body
+assert body.find("if ok then") < body.find("timer.handle = handle"), (
+    "successful timer construction must own scheduled work even without a readable handle"
+)
+
+addon_loaded = re.search(r"local function IsAddOnFullyLoaded\(addonName\)(.*?)\nend", core, re.DOTALL)
+assert addon_loaded
+body = addon_loaded.group(1)
+assert "_loadedOrLoading, loaded" in body and "loaded == true" in body
+assert "return loadedOrLoading" not in body, (
+    "loading-in-progress must not be treated as fully loaded"
+)
+
+render_target = re.search(r"local function GetRenderTarget\(frame\)(.*?)\nend", core, re.DOTALL)
+assert render_target
+body = render_target.group(1)
+assert "if iconFrame ~= nil then" in body
+assert "if not FrameCanBeUsed(iconFrame) then return nil end" in body, (
+    "an assigned inaccessible icon target must not fall back to the parent button"
+)
+
+print_path = re.search(r"local function Print\(message\)(.*?)\nend", core, re.DOTALL)
+assert print_path
+body = print_path.group(1)
+assert 'ReadMember(_G, "DEFAULT_CHAT_FRAME")' in body
+assert 'ReadMember(chatFrame, "AddMessage")' in body and "pcall(addMessage" in body
+
+signal_owner = re.search(r"local function SetEventSignal\(spellID\)(.*?)\nend", core, re.DOTALL)
+assert signal_owner
+body = signal_owner.group(1)
+assert "local expires = ScheduleTimer" in body and "local reconciles = expires and ScheduleTimer" in body
+assert "ClearEventSignal(spellID)" in body and "return false" in body
+
+queue_refresh_body = queue_refresh.group(1)
+assert "FlushPendingActionRefresh" in queue_refresh_body and "if not ScheduleTimer" in queue_refresh_body
+
+reset_recover = re.search(r"local function ResetAndRecover\(reason\)(.*?)\nend", core, re.DOTALL)
+assert reset_recover
+body = reset_recover.group(1)
+assert body.find("InvalidateObservedAssignments()") < body.find("RebuildSpellFamilies()")
+
+assert "pcall(C_Timer.After, 0, function() SDG:OnLogin() end)" in core
 
 # Reassignment callbacks must conservatively hide an unreadable current assignment.
 action_callback = re.search(

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.7 — 2026-11-04
+
+- Use the exact second `C_AddOns.IsAddOnLoaded` result: loading-in-progress no longer authorizes Bartender4, Dominos, ElvUI, or Cooldown Viewer discovery.
+- Treat only `ACTIONBAR_SLOT_CHANGED(0)` as broad; denied, fractional, negative, or malformed payloads do no assignment work, while each valid slot is queried once per pass.
+- Invalidate borrowed action/CDM assignment authority immediately on world/spec/secrecy resets, then restore it only from current providers.
+- Never fall back from an assigned but inaccessible icon/render target to the parent button; geometry stays dirty until the actual target is usable.
+- Require the complete selected Cooldown Viewer item lifecycle hook set before an item may render; failed/missing item or viewer hooks remain incomplete evidence and retain recovery ownership.
+- Revalidate active alerts, animation objects, frame levels, render targets, and size-hook ownership at explicit lifecycle boundaries; stable rescans do not repeat completed geometry writes.
+- Preserve one geometry generation across access denial and combat deferral, and ignore stale size hooks after render-target replacement.
+- Query a relevant SHOW payload or last positive candidate first without weakening complete-readable-all-false OFF arbitration.
+- Give every delayed proc, assignment, rescan, test, and diagnostic refresh path a terminal outcome: `NewTimer` falls back to identity-gated `After`, then to bounded synchronous work or conservative state clearing.
+- Gate diagnostic chat-frame/member access and harden the optional debug refresh timer without adding polling or another runtime owner.
+- Extend Lua regressions and mutation checks for loaded-vs-loading, stale assignment reset, inaccessible render targets, complete CDM hooks, timer failure, and hostile diagnostics. Named-client validation remains **NOT-RUN**.
+
 ## 1.4.6 — 2026-11-04
 
 - Treat foreign action-button, render-target, animation, Cooldown Viewer, pool, and hook-method lookup as an access-gated operation; throwing or inaccessible member reads now fail closed instead of escaping the adapter boundary.

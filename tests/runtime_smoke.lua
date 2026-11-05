@@ -226,7 +226,17 @@ local function Advance(seconds)
     now = target
 end
 
-C_AddOns = { GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.6" end end }
+local loadedAddons = {
+    Blizzard_CooldownViewer = true,
+    Dominos = true,
+}
+C_AddOns = {
+    GetAddOnMetadata = function(_, field) if field == "Version" then return "1.4.7" end end,
+    IsAddOnLoaded = function(addonName)
+        local loaded = loadedAddons[addonName] == true
+        return loaded, loaded
+    end,
+}
 
 local baseMap = { [1242174] = 47541 }
 local overrideMap = { [47541] = 1242174 }
